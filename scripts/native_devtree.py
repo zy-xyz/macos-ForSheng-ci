@@ -1,0 +1,196 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Publish the native EL1 text-protection state in generated Apple DTs."""
+from pathlib import Path
+import struct
+import uuid
+import zlib
+
+
+def seed_vm_nvram_uuid(image: bytes, identity: uuid.UUID) -> bytes:
+    # Modify only an empty CHRP proxy created by this tool; reject existing firmware variables.
+    if (len(image) != 8192 or image[4:16] != b'nvram' + bytes(7)
+            or image[36:48] != b'common' + bytes(6)
+            or struct.unpack_from('<H', image, 34)[0] * 16 != 2064
+            or struct.unpack_from('<I', image, 16)[0] != zlib.adler32(image[20:])):
+        raise ValueError('requires the generated volatile CHRP bank')
+    encoded = bytearray()
+    for value in identity.bytes:
+        encoded.extend((255, 1 if value == 0 else 129) if value in (0, 255) else (value,))
+    record = b'platform-uuid=' + encoded + b'\0'
+    existing = image[48:2096]
+    expected = record + bytes(2048 - len(record))
+    if existing != bytes(2048) and existing != expected:
+        raise ValueError('refusing to replace existing NVRAM variables or VM identity')
+    result = bytearray(image)
+    result[48:2096] = expected
+    struct.pack_into('<I', result, 16, zlib.adler32(result[20:]))
+    return bytes(result)
+
+
+def configure_native_text_state(path: Path, *, development_root: bool = False,
+                                root_hash: bytes | None = None,
+                                boot_volume_uuid: uuid.UUID | None = None,
+                                platform_uuid: uuid.UUID | None = None,
+                                qemu_disable_sleep: bool = False,
+                                native_gop_display: bool = False,
+                                qemu_virtio_input: bool = False) -> None:
+    data = path.read_bytes()
+    chosen = asmb = auth = options = proxies = 0
+    arm_io = gop_nodes = 0
+    defaults = 0
+    input_nodes = 0
+    if qemu_disable_sleep and not development_root:
+        raise ValueError('sleep policy is restricted to the development fixture')
+    if qemu_virtio_input and not development_root:
+        raise ValueError('VirtIO input is restricted to the development fixture')
+    if root_hash is not None and not 16 <= len(root_hash) <= 16384:
+        raise ValueError('invalid raw root-hash payload size')
+
+    if boot_volume_uuid is not None and root_hash is None:
+        raise ValueError('boot volume identity requires the paired recovery root hash')
+
+    if platform_uuid is not None and platform_uuid.int == 0:
+        raise ValueError('VM platform UUID cannot be nil')
+    if platform_uuid is not None and not development_root:
+        raise ValueError('synthetic platform UUID is restricted to the development fixture')
+
+    def node(at: int, parents: tuple[str, ...] = ()) -> tuple[bytes, int]:
+        nonlocal chosen, asmb, auth, options, proxies, arm_io, gop_nodes, defaults, input_nodes
+        if len(parents) > 32 or at + 8 > len(data):
+            raise ValueError('invalid generated device-tree node')
+        count, children = struct.unpack_from('<II', data, at)
+        at += 8
+        if count > 4096 or children > 4096:
+            raise ValueError('excessive generated device-tree counts')
+        properties = {}
+        encoded = bytearray()
+        for _ in range(count):
+            if at + 36 > len(data):
+                raise ValueError('truncated device-tree property')
+            key, size = struct.unpack_from('<32sI', data, at)
+            key = key.split(b'\0', 1)[0].decode('ascii')
+            at += 36
+            end = at + ((size + 3) & ~3)
+            if end > len(data) or key in properties:
+                raise ValueError('invalid or repeated device-tree property')
+            value = data[at:at + size]
+            if platform_uuid is not None and parents == ('device-tree',) and key == 'nvram-proxy-data':
+                value = seed_vm_nvram_uuid(value, platform_uuid)
+                proxies += 1
+            properties[key] = value
+            encoded.extend(struct.pack('<32sI', key.encode(), size) + value + bytes(-size % 4))
+            at = end
+        name = properties.get('name', b'').rstrip(b'\0').decode('ascii')
+        location = (*parents, name)
+        def ensure(key: str, value: bytes) -> None:
+            nonlocal count
+            if key in properties:
+                if properties[key] != value:
+                    raise ValueError(f'generated tree conflicts with native policy: {key}')
+            else:
+                encoded.extend(struct.pack('<32sI', key.encode(), len(value)) +
+                               value + bytes(-len(value) % 4))
+                count += 1
+
+        if qemu_virtio_input and location == ('device-tree',):
+            if properties.get('model') != b'qemu-entry-fixture\0':
+                raise ValueError('VirtIO input requires the owned QEMU tree')
+            ensure('#address-cells', struct.pack('<I', 2))
+            ensure('#size-cells', struct.pack('<I', 2))
+        if qemu_virtio_input and location == ('device-tree', 'native-recovery-input'):
+            input_nodes += 1
+            ensure('compatible', b'sheng,qemu-virtio-input\0')
+            ensure('reg', struct.pack('<QQ', 0x4010000000, 0x100000))
+
+        if platform_uuid is not None and location == ('device-tree', 'options'):
+            options += 1
+            ensure('platform-uuid', platform_uuid.bytes)
+        if qemu_disable_sleep and location == ('device-tree', 'defaults'):
+            defaults += 1
+            # IOPMrootDomain reads this policy before accepting idle or demand sleep.
+            ensure('sleep-disabled', struct.pack('<I', 1))
+        is_chosen = location == ('device-tree', 'chosen')
+        if native_gop_display and location == ('device-tree', 'arm-io'):
+            arm_io += 1
+        if native_gop_display and location == ('device-tree', 'arm-io', 'native-gop'):
+            gop_nodes += 1
+            ensure('device_type', b'display-subsystem\0')
+            ensure('compatible', b'sheng,gop-framebuffer\0')
+        if root_hash is not None and location == ('device-tree', 'chosen', 'secure-boot-hashes'):
+            auth += 1
+            ensure('system-volume-auth-blob', root_hash)
+        if is_chosen:
+            chosen += 1
+            ensure('kernel-ctrr-to-be-enabled', struct.pack('<I', 0))
+            if root_hash is not None:
+                ensure('osenvironment', b'recoveryos\0')
+            if boot_volume_uuid is not None:
+                identity = str(boot_volume_uuid).upper().encode('ascii') + b'\0'
+                ensure('boot-uuid', identity)
+                ensure('apfs-preboot-uuid', identity)
+        if development_root and location == ('device-tree', 'chosen', 'asmb'):
+            asmb += 1
+            ensure('lp-sip0', struct.pack('<Q', 0))
+            ensure('lp-sip1', struct.pack('<I', 1))
+        descendants = bytearray()
+        for _ in range(children):
+            child, at = node(at, location)
+            descendants.extend(child)
+        if qemu_virtio_input and location == ('device-tree',) and not input_nodes:
+            # Bus 0 occupies the first MiB of QEMU virt's default high ECAM window.
+            entries = (('name', b'native-recovery-input\0'),
+                       ('compatible', b'sheng,qemu-virtio-input\0'),
+                       ('reg', struct.pack('<QQ', 0x4010000000, 0x100000)))
+            descendants.extend(struct.pack('<II', len(entries), 0))
+            for key, value in entries:
+                descendants.extend(struct.pack('<32sI', key.encode(), len(value)) +
+                                   value + bytes(-len(value) % 4))
+            children += 1
+            input_nodes += 1
+        if qemu_disable_sleep and location == ('device-tree',) and not defaults:
+            entries = (('name', b'defaults\0'), ('sleep-disabled', struct.pack('<I', 1)))
+            descendants.extend(struct.pack('<II', len(entries), 0))
+            for key, value in entries:
+                descendants.extend(struct.pack('<32sI', key.encode(), len(value)) +
+                                   value + bytes(-len(value) % 4))
+            children += 1
+            defaults += 1
+        if native_gop_display and location == ('device-tree', 'arm-io') and not gop_nodes:
+            # The original framework counts display-subsystem descriptors before matching services.
+            entries = (('name', b'native-gop\0'), ('device_type', b'display-subsystem\0'),
+                       ('compatible', b'sheng,gop-framebuffer\0'))
+            descendants.extend(struct.pack('<II', len(entries), 0))
+            for key, value in entries:
+                descendants.extend(struct.pack('<32sI', key.encode(), len(value)) +
+                                   value + bytes(-len(value) % 4))
+            children += 1
+            gop_nodes += 1
+        if development_root and is_chosen and asmb == 0:
+            entries = (('name', b'asmb\0'), ('lp-sip0', struct.pack('<Q', 0)),
+                       ('lp-sip1', struct.pack('<I', 1)))
+            descendants.extend(struct.pack('<II', len(entries), 0))
+            for key, value in entries:
+                descendants.extend(struct.pack('<32sI', key.encode(), len(value)) +
+                                   value + bytes(-len(value) % 4))
+            children += 1
+            asmb += 1
+        if root_hash is not None and is_chosen and auth == 0:
+            entries = (('name', b'secure-boot-hashes\0'), ('system-volume-auth-blob', root_hash))
+            descendants.extend(struct.pack('<II', len(entries), 0))
+            for key, value in entries:
+                descendants.extend(struct.pack('<32sI', key.encode(), len(value)) +
+                                   value + bytes(-len(value) % 4))
+            children += 1
+            auth += 1
+        return bytes(struct.pack('<II', count, children) + encoded + descendants), at
+
+    result, end = node(0)
+    if (end != len(data) or chosen != 1 or development_root and asmb != 1
+            or root_hash is not None and auth != 1
+            or platform_uuid is not None and (options != 1 or proxies != 1)
+            or qemu_disable_sleep and defaults != 1
+            or qemu_virtio_input and input_nodes != 1
+            or native_gop_display and (arm_io != 1 or gop_nodes != 1)):
+        raise ValueError('requires one complete generated /chosen node')
+    path.write_bytes(result)

@@ -1,0 +1,196 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+import json
+import os
+from pathlib import Path
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'UniXNU/scripts/qemu-entry'))
+from gdb_packets import Packets
+
+
+class NativePanicPanel(unittest.TestCase):
+    def test_busy_writer_keeps_full_panic_and_disjoint_pixels(self):
+        clang = os.environ.get('CLANG', shutil.which('clang'))
+        qemu = Path(os.environ.get('SHENG_TEST_QEMU', str(ROOT / 'out/qemu-root/usr/bin/qemu-system-aarch64')))
+        font = ROOT / 'sources/macos26/xnu/osfmk/console/iso_font.c'
+        if not clang or not qemu.exists() or not font.exists():
+            self.skipTest('requires clang, QEMU and the pinned XNU font')
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            for source, target in (('retained_log.h', 'pe_sheng_log.h'),
+                                   ('framebuffer_owner.h', 'pe_sheng_framebuffer.h'),
+                                   ('smp_log.h', 'pe_sheng_smp_log.h'),
+                                   ('panel_console.h', 'pe_sheng_panel.h'), ('vm_trace.h', 'vm_trace.h'),
+                                   ('boot_progress.h', 'pe_sheng_boot_progress.h'),
+                                   ('boot_progress_kernel.h', 'pe_sheng_boot_progress_kernel.h')):
+                shutil.copy2(ROOT / 'platform/sheng/macos26/log' / source, work / target)
+            sys.path.insert(0, str(ROOT / 'scripts'))
+            from native_panic_qr import render
+            encoder, _ = render(ROOT)
+            (work / 'pe_sheng_qr_encoder.h').write_text(encoder)
+            for source, target in (('panic_qr.h', 'pe_sheng_panic_qr.h'),
+                                   ('qr/runtime.h', 'pe_sheng_qr_runtime.h'), ('qr/qrcodegen.h', 'qrcodegen.h')):
+                shutil.copy2(ROOT / 'platform/sheng/macos26/log' / source, work / target)
+            shutil.copy2(font, work / 'pe_sheng_font.h')
+            (work / 'entry.S').write_text('.text\n.global _start\n_start:\n msr daifset,#15\n'
+                ' adr x0, vectors\n msr vbar_el1,x0\n isb\n'
+                ' ldr x0,=0x40300000\n mov sp,x0\n bl run_trace\n.global done\ndone:\n b done\n'
+                '.balign 2048\nvectors:\n.rept 16\n b trap\n.space 124\n.endr\n'
+                'trap:\n mrs x0,elr_el1\n mrs x1,esr_el1\n mrs x2,far_el1\n'
+                '.global fatal\nfatal:\n b fatal\n')
+            (work / 'runtime.ld').write_text('ENTRY(_start)\nSECTIONS { . = 0x40200000; '
+                '.text : { *(.text*) } .data : { *(.data*) } .bss : { *(.bss*) } }\n')
+            compiler = Path(clang).resolve()
+            subprocess.run([str(compiler), '--target=aarch64-none-elf', '-O2', '-ffreestanding',
+                '-fno-stack-protector', '-mgeneral-regs-only', '-mstrict-align', '-Wall', '-Wextra', '-Werror', '-I' + str(work),
+                '-I' + str(ROOT / 'sources/macos26/xnu/osfmk'), '-nostdlib', '-fuse-ld=lld',
+                '-Wl,-T,' + str(work / 'runtime.ld'), str(work / 'entry.S'),
+                str(ROOT / 'tests/native_panic_panel.c'), '-o', str(work / 'runtime.elf')], check=True, timeout=30)
+            from elftools.elf.elffile import ELFFile
+            with (work / 'runtime.elf').open('rb') as stream:
+                symbols = {symbol.name: int(symbol['st_value'])
+                    for symbol in ELFFile(stream).get_section_by_name('.symtab').iter_symbols()}
+            with socket.socket() as listener:
+                listener.bind(('127.0.0.1', 0))
+                port = listener.getsockname()[1]
+            env = dict(os.environ)
+            with (work / 'qemu.log').open('w') as log:
+                process = subprocess.Popen([str(qemu), '-M', 'virt,virtualization=off,secure=off',
+                    '-cpu', 'cortex-a710', '-m', '256', '-nodefaults', '-display', 'none',
+                    '-serial', 'none', '-monitor', 'none', '-device',
+                    f'loader,file={work}/runtime.elf,cpu-num=0', '-gdb', f'tcp:127.0.0.1:{port}', '-S'],
+                    env=env, stdout=log, stderr=log)
+                try:
+                    deadline = time.monotonic() + 5
+                    while True:
+                        try:
+                            connection = socket.create_connection(('127.0.0.1', port), timeout=.2)
+                            break
+                        except OSError:
+                            if time.monotonic() > deadline:
+                                raise RuntimeError('QEMU startup failed: ' + (work / 'qemu.log').read_text())
+                            time.sleep(.05)
+                    with connection:
+                        connection.settimeout(10)
+                        connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                        request = Packets(connection).request
+
+                        def memory(address, size):
+                            return b''.join(bytes.fromhex(request(f'm{address + offset:x},{min(4096, size - offset):x}'))
+                                for offset in range(0, size, 4096))
+
+                        def number(name):
+                            return int.from_bytes(memory(symbols[name], 8), 'little')
+
+                        self.assertEqual(request(f'Z1,{symbols["panic_ready"]:x},4'), 'OK')
+                        self.assertEqual(request(f'Z1,{symbols["progress_ready"]:x},4'), 'OK')
+                        self.assertEqual(request(f'Z1,{symbols["handoff_ready"]:x},4'), 'OK')
+                        self.assertEqual(request(f'Z1,{symbols["fatal"]:x},4'), 'OK')
+                        try:
+                            stopped = request('c')
+                        except TimeoutError as error:
+                            connection.sendall(b'\x03')
+                            Packets(connection).receive()
+                            registers = bytes.fromhex(request('g'))
+                            pc = int.from_bytes(registers[32 * 8:33 * 8], 'little')
+                            near = sorted((address, name) for name, address in symbols.items() if address <= pc)[-5:]
+                            raise RuntimeError(f'guest stopped at pc={pc:x}, symbols={near}') from error
+                        self.assertTrue(stopped.startswith(('T05', 'S05')))
+                        registers = bytes.fromhex(request('g'))
+                        if int.from_bytes(registers[32 * 8:33 * 8], 'little') == symbols['fatal']:
+                            values = [int.from_bytes(registers[n * 8:(n + 1) * 8], 'little') for n in range(3)]
+                            near = sorted((address, name) for name, address in symbols.items() if address <= values[0])[-4:]
+                            self.fail(f'ELR/ESR/FAR={values}, symbols={near}')
+                        self.assertEqual(int.from_bytes(registers[32 * 8:33 * 8], 'little'), symbols['progress_ready'])
+                        retained = memory(symbols['sheng_log_buffer'], 82048)
+                        self.assertIn(b'SHENG-PROGRESS: Language Chooser pid=0 starts=0 exits=0 wait-status=0', retained)
+                        self.assertIn(b'SHENG-PROGRESS: RecoveryOS Agent pid=0 starts=0 exits=0 wait-status=0', retained)
+                        self.assertIn(b'SHENG-PROGRESS: WindowServer pid=85 starts=1 exits=0 wait-status=0', retained)
+                        progress_base = 0x44000000 + (608 + 64 + 24 * 32 + 12 * 32) * 12192 + 896
+                        progress_pixels = memory(progress_base, 128 * 12192)
+                        glyphs = memory(symbols['sheng_panel_font'], 4096)
+                        for line, expected in enumerate(('BOOT [#####-#---] - WindowServer exec',
+                                'No new stage/service: 60s - no loop verdict')):
+                            for column, char in enumerate(expected):
+                                for y in range(32):
+                                    bits = glyphs[ord(char) * 16 + y // 2]
+                                    for x in range(16):
+                                        offset = (line * 32 + y) * 12192 + column * 64 + x * 4
+                                        pixel = int.from_bytes(progress_pixels[offset:offset + 4], 'little')
+                                        self.assertEqual(pixel, 0xffffffff if bits & (1 << (x // 2)) else 0xff000000)
+                        from PIL import Image
+                        output = ROOT / 'out/native-panic-writer-validation'
+                        output.mkdir(parents=True, exist_ok=True)
+                        Image.frombytes('RGBX', (3048, 128), progress_pixels, 'raw', 'BGRX').convert('RGB').crop(
+                            (0, 0, 1408, 128)).save(output / 'progress-footer.png')
+                        self.assertEqual(request(f'z1,{symbols["progress_ready"]:x},4'), 'OK')
+                        self.assertTrue(request('c').startswith(('T05', 'S05')))
+                        self.assertEqual(memory(progress_base, len(progress_pixels)), progress_pixels)
+                        self.assertEqual(request(f'z1,{symbols["handoff_ready"]:x},4'), 'OK')
+                        self.assertTrue(request('c').startswith(('T05', 'S05')))
+                        self.assertEqual(number('panic_test_checks'), 11)
+                        self.assertEqual(number('sheng_panel_bound_rows'), 24)
+                        self.assertEqual(number('sheng_panic_panel_bound_rows'), 16)
+                        text = memory(symbols['sheng_first_panic_text'], 4096)
+                        self.assertIn(b'PAYLOAD_END_AFTER_511_BYTES', text)
+                        payload = memory(symbols['sheng_qr_payload'], 640).split(b'\0', 1)[0].decode('ascii')
+                        self.assertIn('CALLER=0000000000112233\n', payload)
+                        self.assertIn('REGS=panic-hook\nREASON=UFS ROOT FAILURE:', payload)
+                        self.assertTrue(payload.endswith('\nTRUNCATED=1'))
+                        # Compare title and body pixels against the actual font instead of relying only on the ready flag.
+                        base = 0x44000000 + (608 + 64 + 24 * 32) * 12192 + 896
+                        before = memory(base, 16 * 32 * 12192)
+                        glyphs = memory(symbols['sheng_panel_font'], 4096)
+                        for line, expected in enumerate(('SHENG - PANIC DETAIL', 'UFS ROOT FAILURE: root')):
+                            for column, char in enumerate(expected):
+                                for y in range(32):
+                                    bits = glyphs[ord(char) * 16 + y // 2]
+                                    for x in range(16):
+                                        offset = (line * 32 + y) * 12192 + column * 64 + x * 4
+                                        pixel = int.from_bytes(before[offset:offset + 4], 'little')
+                                        self.assertEqual(pixel, 0xffffffff if bits & (1 << (x // 2)) else 0xff000000)
+                        self.assertEqual(request(f'z1,{symbols["panic_ready"]:x},4'), 'OK')
+                        self.assertEqual(request(f'Z1,{symbols["done"]:x},4'), 'OK')
+                        self.assertTrue(request('c').startswith(('T05', 'S05')))
+                        self.assertEqual(number('panic_test_checks'), 15)
+                        self.assertEqual(number('snapshot_test_checks'), 7)
+                        self.assertEqual(number('writer_scope_test_checks'), 31)
+                        self.assertEqual(number('scroll_bounds_test_checks'), 15)
+                        self.assertEqual(before, memory(base, len(before)))
+                        self.assertEqual(memory(symbols['sheng_qr_payload'], 640).split(b'\0', 1)[0].decode('ascii'), payload)
+                        import zxingcpp
+                        panic_image = Image.frombytes('RGBX', (3048, 512), before, 'raw', 'BGRX').convert('RGB').crop(
+                            (0, 0, 1408, 512))
+                        codes = zxingcpp.read_barcodes(panic_image)
+                        self.assertEqual(len(codes), 1)
+                        self.assertEqual(codes[0].text, payload)
+                        output = ROOT / 'out/native-panic-writer-validation'
+                        output.mkdir(parents=True, exist_ok=True)
+                        (output / 'result.json').write_text(json.dumps(dict(
+                            writer_not_stolen=True, first_panic_text_preserved=True,
+                            panel_contention_keeps_ram_log=True, panel_contention_allows_snapshot=True,
+                            ram_writer_restores_interrupt_mask=True,
+                            contended_scroll_cursor_bounded=True, scroll_guard_pixels_preserved=True,
+                            periodic_service_inventory_verified=True,
+                            actual_font_pixels_verified=True, ordinary_tail_lines=80,
+                            progress_age_and_segments_verified=True, handoff_stops_progress_pixels=True,
+                            panic_qr_decoded_from_arm_pixels=True, panic_qr_payload=payload,
+                            panic_rows=16, normal_rows=24, hardware_executed=False), indent=2) + '\n')
+                        from PIL import Image
+                        raw = memory(0x44000000 + 608 * 12192 + 896, (64 + 40 * 32) * 12192)
+                        Image.frombytes('RGBX', (3048, 1344), raw, 'raw', 'BGRX').convert('RGB').crop(
+                            (0, 0, 1408, 1344)).save(output / 'screen.png')
+                finally:
+                    process.terminate()
+                    process.wait(timeout=5)
+
+
+if __name__ == '__main__':
+    unittest.main()

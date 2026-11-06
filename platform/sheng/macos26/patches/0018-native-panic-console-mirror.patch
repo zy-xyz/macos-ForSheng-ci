@@ -1,0 +1,14 @@
+--- a/osfmk/console/serial_console.c
++++ b/osfmk/console/serial_console.c
+@@ -263,7 +263,10 @@
+ 
+ #if SHENG
+ 	/* The serial path is recorded by uart_putc_options; avoid duplicate entries. */
+-	if (idx == VC_CONS_OPS) sheng_log_putc(c);
++	/* Panic writes each character to video and the PE UART; retain only the UART record. */
++	bool mirror_uses_uart = in_debugger && !disable_serial_output &&
++	    PE_kputc != NULL && PE_kputc != console_write_unbuffered;
++	if (idx == VC_CONS_OPS && !mirror_uses_uart) sheng_log_putc(c);
+ #endif
+ 	cons_ops[idx].putc(c, poll);
+ }

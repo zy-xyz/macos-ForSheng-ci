@@ -1,0 +1,338 @@
+name: sheng macOS bring-up
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Build target; no job deploys to hardware
+        type: choice
+        options: [check, preflight, monitor, apple, apple26, macos26-xnu, macos26-kernel, kext, xnu, sheng-xnu, abi-bootstrap, reference-xnu]
+        default: check
+      native_ufs:
+        description: Compile the default-off UFS companion; no hardware deployment
+        type: boolean
+        default: false
+      native_gop:
+        description: Compile the default-off CPU GOP display; requires native_ufs and arm64e
+        type: boolean
+        default: false
+      native_input:
+        description: Compile default-off QEMU VirtIO HID input; requires native_gop
+        type: boolean
+        default: false
+      native_arch:
+        description: Native kernel ABI; ARM64E is EL1 bringup only
+        type: choice
+        options: [arm64, arm64e]
+        default: arm64
+permissions:
+  contents: read
+concurrency:
+  group: sheng-${{ github.ref }}-${{ inputs.target }}
+  cancel-in-progress: false
+jobs:
+  check:
+    if: inputs.target != 'macos26-xnu' && inputs.target != 'macos26-kernel'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python3 scripts/sources.py fetch --group core
+      - run: python3 scripts/apply_patches.py
+      - run: python3 scripts/sources.py verify --group core
+      - run: python3 -m unittest discover -s tests -v
+  preflight:
+    if: inputs.target == 'preflight'
+    needs: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: sudo apt-get update && sudo apt-get install -y clang lld llvm uuid-dev nasm
+      - run: python3 scripts/sources.py fetch --group core
+      - run: python3 scripts/apply_patches.py
+      - name: Prepare LLVM tool paths
+        run: |
+          mkdir -p out/toolchain
+          for tool in clang llvm-lib lld-link llvm-rc; do
+            ln -s "$(command -v "$tool")" "out/toolchain/$tool"
+          done
+          echo "CLANG_BIN=$GITHUB_WORKSPACE/out/toolchain/" >> "$GITHUB_ENV"
+      - run: bash scripts/build_preflight.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sheng-preflight
+          path: |
+            out/uefi/RELEASE_CLANGPDB/AARCH64/ShengPreflight.efi
+            out/preflight-build.json
+            out/logs/
+          retention-days: 7
+  macos:
+    if: inputs.target == 'monitor' || inputs.target == 'apple' || inputs.target == 'apple26' || inputs.target == 'kext' || inputs.target == 'xnu'
+    needs: check
+    runs-on: xcode-27
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python3 scripts/sources.py fetch --group core
+      - name: Verify toolchain
+        run: |
+          sw_vers
+          uname -m
+          xcodebuild -version
+          test "$(xcrun --sdk macosx --show-sdk-version)" = 27.0
+          test "$(uname -m)" = arm64
+      - name: Install LLVM
+        if: inputs.target == 'monitor'
+        run: brew install llvm lld
+      - name: Cache exact KDK input
+        if: inputs.target == 'apple' || inputs.target == 'apple26'
+        uses: actions/cache@v4
+        with:
+          path: private/apple/Kernel_Debug_Kit_*.dmg
+          key: ${{ runner.os }}-${{ runner.arch }}-sdk27.0-${{ inputs.target }}-${{ hashFiles('sources.lock.json', 'patches/**', 'config/guest.json', 'config/macos26.json', 'scripts/verify_kdk.sh', 'scripts/check_apple.py') }}
+      - name: Compile monitor
+        if: inputs.target == 'monitor'
+        run: python3 scripts/build_monitor.py --llvm-bin "$(brew --prefix llvm)/bin"
+      - name: Verify Apple package and kernel identity
+        if: inputs.target == 'apple'
+        run: bash scripts/verify_kdk.sh
+      - name: Verify paired macOS 26 KDK
+        if: inputs.target == 'apple26'
+        run: bash scripts/verify_kdk.sh config/macos26.json
+      - name: Verify kext prerequisites
+        if: inputs.target == 'kext'
+        run: python3 scripts/check_apple.py --kext
+      - name: Build qualified upstream kext
+        if: inputs.target == 'kext'
+        run: OUT="$GITHUB_WORKSPACE/out/kext" sh Snapintosh/gpu/adreno-kext/kext/build.sh
+      - name: Verify XNU prerequisites
+        if: inputs.target == 'xnu'
+        run: python3 scripts/check_apple.py --xnu
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macos-${{ inputs.target }}
+          path: |
+            out/monitor/*.bin
+            out/monitor/build.json
+            out/kdk-verification.json
+            out/logs/
+          if-no-files-found: warn
+          retention-days: 7
+  reference-xnu:
+    if: inputs.target == 'reference-xnu' || inputs.target == 'sheng-xnu' || inputs.target == 'abi-bootstrap'
+    needs: check
+    runs-on: xcode-27
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python3 scripts/sources.py fetch --group core
+      - run: python3 scripts/sources.py fetch --group feeds
+      - run: python3 scripts/apply_patches.py
+      - name: Install source kernel build tools
+        run: brew install cmake ninja unifdef llvm lld dtc
+      - name: Record the actual reference toolchain identity
+        id: reference-toolchain
+        run: |
+          mkdir -p out/reference-xnu
+          { xcodebuild -version; xcrun clang --version; xcrun --sdk macosx --show-sdk-version; xcrun --sdk iphoneos --show-sdk-version; } > out/reference-xnu/toolchain.txt
+          cat out/reference-xnu/toolchain.txt
+          echo "identity=$(shasum -a 256 out/reference-xnu/toolchain.txt | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        id: kernel-cache
+        with:
+          path: |
+            out/reference-xnu/work/sheng/tree/.cache/
+            out/reference-xnu/work/sheng/tree/build/
+            out/sheng-xnu/work/sheng/tree/.cache/
+            out/sheng-xnu/work/sheng/tree/build/
+            out/sheng-abi-bootstrap/work/sheng/tree/.cache/
+            out/sheng-abi-bootstrap/work/sheng/tree/build/
+          key: xnu-${{ inputs.target }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.reference-toolchain.outputs.identity }}-${{ hashFiles('sources.lock.json', 'patches/**', 'config/reference-xnu*', 'config/sheng*', 'scripts/build_reference_xnu.py') }}
+      - name: Cache pinned reconstructed private inputs
+        if: inputs.target == 'sheng-xnu'
+        uses: actions/cache@v4
+        with:
+          path: private/build-inputs/*.tar.gz
+          key: sheng-inputs-${{ hashFiles('config/sheng-reconstructed-inputs.json') }}
+      - name: Build the selected sheng baseline
+        env:
+          SHENG_BUILD_TARGET: ${{ inputs.target }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$SHENG_BUILD_TARGET" = sheng-xnu ]; then
+            python3 scripts/build_reference_xnu.py --upstream-sheng -j 4
+          elif [ "$SHENG_BUILD_TARGET" = abi-bootstrap ]; then
+            python3 scripts/build_reference_xnu.py --abi-bootstrap -j 4
+          else
+            python3 scripts/build_reference_xnu.py -j 4
+          fi
+      - name: Preserve source build reuse after a failed dependency
+        if: always() && steps.kernel-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            out/reference-xnu/work/sheng/tree/.cache/
+            out/reference-xnu/work/sheng/tree/build/
+            out/sheng-xnu/work/sheng/tree/.cache/
+            out/sheng-xnu/work/sheng/tree/build/
+            out/sheng-abi-bootstrap/work/sheng/tree/.cache/
+            out/sheng-abi-bootstrap/work/sheng/tree/build/
+          key: ${{ steps.kernel-cache.outputs.cache-primary-key }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ${{ inputs.target == 'sheng-xnu' && 'sheng-upstream-xnu' || inputs.target == 'abi-bootstrap' && 'sheng-abi-bootstrap' || 'sheng-el1-reference-xnu' }}
+          path: |
+            out/reference-xnu/kernel.macho
+            out/reference-xnu/build.json
+            out/reference-xnu/restored-headers.json
+            out/reference-xnu/kernel-audit.json
+            out/reference-xnu/toolchain.txt
+            out/reference-xnu/work/sheng/logs/
+            out/sheng-xnu/kernel.macho
+            out/sheng-xnu/build.json
+            out/sheng-xnu/kernel-audit.json
+            out/sheng-xnu/restored-headers.json
+            out/sheng-xnu/work/sheng/logs/
+            out/sheng-xnu/work/sheng/tree/build/reconstructed*.json
+            out/sheng-xnu/work/sheng/tree/build/reconstructed*.log
+            out/sheng-xnu/work/sheng/tree/build/storage-abi/*.json
+            out/sheng-xnu/work/sheng/tree/build/storage-abi/*.log
+            out/sheng-xnu/work/sheng/tree/build/display-analysis/*.json
+            out/sheng-xnu/work/sheng/tree/build/amfi-pmgr-contract/*.json
+            out/sheng-xnu/work/sheng/tree/build/verified-root-os-xnu-bundle/*.json
+            out/sheng-xnu/work/sheng/tree/build/verified-root-os-xnu-bundle/*.log
+            out/sheng-abi-bootstrap/kernel.macho
+            out/sheng-abi-bootstrap/build.json
+            out/sheng-abi-bootstrap/kernel-audit.json
+            out/sheng-abi-bootstrap/restored-headers.json
+            out/sheng-abi-bootstrap/work/sheng/logs/
+          if-no-files-found: warn
+          retention-days: 7
+
+  macos26-xnu:
+    if: inputs.target == 'macos26-xnu' || inputs.target == 'macos26-kernel'
+    runs-on: xcode-27
+    timeout-minutes: 90
+    env:
+      NATIVE_ARCH: ${{ inputs.native_arch || 'arm64' }}
+      NATIVE_OUT: ${{ inputs.native_arch == 'arm64e' && 'out/macos26-xnu-arm64e' || 'out/macos26-xnu' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Restore pinned native source checkouts
+        id: native-sources
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            UniXNU/
+            UniXNU-sheng/
+            uefi-sheng/
+            xnu/
+            Snapintosh/
+            q1n1/
+            sources/macos26/
+          key: macos26-sources-v1-${{ hashFiles('sources.lock.json', 'config/macos26-sources.json') }}
+      - run: python3 scripts/sources.py fetch --group core
+      - run: python3 scripts/sources.py fetch --lock config/macos26-sources.json --group macos26
+      - name: Save pristine pinned source checkouts
+        if: steps.native-sources.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            UniXNU/
+            UniXNU-sheng/
+            uefi-sheng/
+            xnu/
+            Snapintosh/
+            q1n1/
+            sources/macos26/
+          key: ${{ steps.native-sources.outputs.cache-primary-key }}
+      - run: python3 scripts/apply_patches.py
+      - run: brew install cmake ninja unifdef
+      - uses: actions/cache@v4
+        with:
+          path: private/apple/Kernel_Debug_Kit_26.5_build_25F71.dmg
+          key: macos26-kdk-${{ hashFiles('config/macos26.json') }}
+      - name: Select stable KDK staging path
+        run: echo "SHENG_KDK_EXPANDED=$RUNNER_TEMP/sheng-kdk-25F71" >> "$GITHUB_ENV"
+      - run: bash scripts/verify_kdk.sh config/macos26.json
+      - name: Identify native build toolchain
+        id: native-toolchain
+        run: |
+          echo "identity=$( { xcodebuild -version; xcrun clang --version; xcrun --sdk macosx --show-sdk-version; } | shasum -a 256 | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        id: native-cache
+        with:
+          path: ${{ env.NATIVE_OUT }}/
+          key: macos26-native-${{ env.NATIVE_ARCH }}-${{ runner.arch }}-${{ steps.native-toolchain.outputs.identity }}-${{ hashFiles('config/macos26-sources.json', 'config/macos26.json', 'platform/sheng/macos26/patches/**', 'platform/sheng/macos26/pac/**', 'platform/sheng/macos26/log/**', 'platform/sheng/macos26/crypto/**', 'platform/sheng/macos26/recovery/**', 'config/macos26-recovery-ui-pages.json', 'scripts/native_recovery_ui.py', 'platform/sheng/macos26/storage/**', 'config/macos26-recovery-root.json', 'patches/UniXNU/0030-*', 'patches/UniXNU/0031-*', 'patches/UniXNU/0032-*', 'patches/UniXNU/0034-*', 'patches/UniXNU/0035-*', 'patches/UniXNU/0036-*', 'patches/UniXNU/0037-*', 'config/macoslog.json', 'scripts/native_log_file.py', 'scripts/build_macos26_xnu.py', 'scripts/build_macos26_storage.py', 'scripts/prepare_macos26_gop.py', 'scripts/prepare_macos26_input.py', 'config/macos26-input-reference.json', 'platform/sheng/macos26/input/**', 'config/macos26-gop-reference.json', 'platform/sheng/macos26/display/**', 'scripts/build_macos26_crypto.py', 'scripts/seal_macos26_crypto.py', 'scripts/native_macho.py') }}
+          restore-keys: |
+            macos26-native-${{ env.NATIVE_ARCH }}-${{ runner.arch }}-${{ steps.native-toolchain.outputs.identity }}-
+      - name: Compile native macOS 26 SHENG sources
+        if: inputs.target == 'macos26-xnu'
+        run: python3 scripts/build_macos26_xnu.py --arch "$NATIVE_ARCH" --kdk-root "$SHENG_KDK_EXPANDED/KDK.pkg/Payload" -j 4
+      - name: Link native macOS 26 SHENG kernel
+        if: inputs.target == 'macos26-kernel'
+        run: python3 scripts/build_macos26_xnu.py --arch "$NATIVE_ARCH" --link-kernel ${{ inputs.native_ufs && '--build-ufs-driver' || '' }} ${{ inputs.native_gop && '--build-gop-display' || '' }} ${{ inputs.native_input && '--build-recovery-input' || '' }} --kdk-root "$SHENG_KDK_EXPANDED/KDK.pkg/Payload" -j 4
+      - uses: actions/cache/save@v4
+        if: always() && steps.native-cache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ env.NATIVE_OUT }}/
+          key: ${{ steps.native-cache.outputs.cache-primary-key }}
+      - uses: actions/upload-artifact@v4
+        if: success() && inputs.target == 'macos26-kernel'
+        with:
+          name: macos26-sheng-kernel
+          path: |
+            ${{ env.NATIVE_OUT }}/build.json
+            ${{ env.NATIVE_OUT }}/kernel.development.sheng
+            ${{ env.NATIVE_OUT }}/kernel.development.sheng.map
+            ${{ env.NATIVE_OUT }}/kernel.development.sheng.dSYM/
+            ${{ env.NATIVE_OUT }}/storage-driver/
+            ${{ env.NATIVE_OUT }}/ufs-driver/
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macos26-sheng-diagnostics
+          path: |
+            ${{ env.NATIVE_OUT }}/build.json
+            ${{ env.NATIVE_OUT }}/logs/
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macos26-sheng-source
+          path: |
+            out/kdk-verification.json
+            out/logs/kdk-signature.log
+            ${{ env.NATIVE_OUT }}/build.json
+            ${{ env.NATIVE_OUT }}/logs/
+            ${{ env.NATIVE_OUT }}/ArmCpu.o
+            ${{ env.NATIVE_OUT }}/ArmDTPlatform.o
+            ${{ env.NATIVE_OUT }}/storage-driver/
+            ${{ env.NATIVE_OUT }}/ufs-driver/
+            ${{ env.NATIVE_OUT }}/obj/DEVELOPMENT_ARM64_SHENG/libkernel.development.sheng.a
+            ${{ env.NATIVE_OUT }}/obj/DEVELOPMENT_ARM64_SHENG/compile_commands.json
+            ${{ env.NATIVE_OUT }}/kernel.development.sheng
+            ${{ env.NATIVE_OUT }}/kernel.development.sheng.map
+            ${{ env.NATIVE_OUT }}/kernel.development.sheng.dSYM/
+            ${{ env.NATIVE_OUT }}/obj/DEVELOPMENT_ARM64_SHENG/kernel.development.sheng.link/
+          if-no-files-found: warn
+          retention-days: 7

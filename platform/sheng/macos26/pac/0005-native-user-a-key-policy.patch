@@ -1,0 +1,32 @@
+--- a/osfmk/arm64/pac_asm.h
++++ b/osfmk/arm64/pac_asm.h
+@@ -107,6 +107,11 @@
+  ldr \hi, [\cpu, ((CPU_SHENG_PAC_BANK + 64) + 8)]
+  msr APGAKeyLo_EL1, \lo
+  msr APGAKeyHi_EL1, \hi
++ /* Tasks may disable A-key authentication at EL0; restore it before any kernel authentication. */
++ mrs \lo, SCTLR_EL1
++ orr \lo, \lo, #SCTLR_PACIA_ENABLED
++ orr \lo, \lo, #SCTLR_PACDA_ENABLED
++ msr SCTLR_EL1, \lo
+  isb
+ .endmacro
+ 
+@@ -136,6 +141,17 @@
+  str x5, [x1, CPU_SHENG_PAC_RETURNS]
+  msr APGAKeyLo_EL1, x3
+  msr APGAKeyHi_EL1, x4
++ /* Follow the original task policy: disable A authentication only at the final EL0 boundary and retain B authentication. */
++ mrs x2, TPIDR_EL1
++ ldr w2, [x2, TH_ARM_MACHINE_FLAGS]
++ mrs x3, SCTLR_EL1
++ orr x3, x3, #SCTLR_PACIA_ENABLED
++ orr x3, x3, #SCTLR_PACDA_ENABLED
++ tbz w2, #ARM_MACHINE_THREAD_DISABLE_USER_JOP_SHIFT, Lsheng_user_enables_ready_\@
++ bic x3, x3, #SCTLR_PACIA_ENABLED
++ bic x3, x3, #SCTLR_PACDA_ENABLED
++Lsheng_user_enables_ready_\@:
++ msr SCTLR_EL1, x3
+  isb
+  b Lsheng_user_keys_done_\@
+ Lsheng_bad_user_key_\@:

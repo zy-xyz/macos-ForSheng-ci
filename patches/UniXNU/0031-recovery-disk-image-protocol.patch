@@ -1,0 +1,24 @@
+diff --git a/drivers/NativeUfs/NativeUfs.cpp b/drivers/NativeUfs/NativeUfs.cpp
+--- a/drivers/NativeUfs/NativeUfs.cpp
++++ b/drivers/NativeUfs/NativeUfs.cpp
+@@ -1294,6 +1294,20 @@
+   strlcpy (label, name, sizeof (label));
+   absolute = absoluteOffset;
+   bytes = size;
++#if defined(NATIVE_UFS_RECOVERY_ROOT) && NATIVE_UFS_RECOVERY_ROOT
++  // Publish the BaseSystem disk image stored in the partition rather than the underlying UFS controller.
++  OSDictionary *protocol = OSDictionary::withCapacity (2);
++  OSString *interconnect = OSString::withCString (kIOPropertyPhysicalInterconnectTypeVirtual);
++  OSString *location = OSString::withCString (kIOPropertyExternalKey);
++  bool described = protocol && interconnect && location &&
++    protocol->setObject (kIOPropertyPhysicalInterconnectTypeKey, interconnect) &&
++    protocol->setObject (kIOPropertyPhysicalInterconnectLocationKey, location) &&
++    setProperty (kIOPropertyProtocolCharacteristicsKey, protocol);
++  OSSafeReleaseNULL (location);
++  OSSafeReleaseNULL (interconnect);
++  OSSafeReleaseNULL (protocol);
++  if (!described) return false;
++#endif
+   windowLock = IOLockAlloc ();
+   if (!windowLock) return false;
+   bounce = static_cast<uint8_t *> (IOMalloc (kDataMax));

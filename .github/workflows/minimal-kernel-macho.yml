@@ -1,0 +1,142 @@
+# minimal-kernel-macho.final.yml —— t33 定稿版（不进 repo/.github/，只在 fork 内生效）
+# 用法：run-actions-kernel-macho.sh 会把本文件放到 <fork>/.github/workflows/minimal-kernel-macho.yml
+# 事实校正（相对 t27 草案）：
+#   * --llvm-bin / --iasl-bin 属于 scripts/build_firmware.py（EDK2 FV 链，t28 已在 Linux 跑通），
+#     scripts/build_reference_xnu.py 只有 --prepare-only / --upstream-sheng / --abi-bootstrap / -j，
+#     所以 runner 上不需要给 build_reference_xnu.py 传 --llvm-bin。
+#   * runner 自带 Xcode 27.1 的 clang；brew install llvm lld 装的是 llvm-* 工具家族（llvm-lib/llvm-rc 等）
+#     和 unifdef/dtc，与上游 .github/workflows/bringup.yml:146 完全同款，非可选。
+name: minimal kernel.macho
+
+on:
+  workflow_dispatch:
+    inputs:
+      jobs:
+        description: Parallel compile jobs
+        type: number
+        default: 4
+      runs_on:
+        description: Runner label (xcode-27 = macOS 27.0.1 arm64, default Xcode 27.1)
+        type: string
+        default: xcode-27
+
+permissions:
+  contents: read
+
+concurrency:
+  group: minimal-kernel-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  kernel:
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Environment probe
+        run: |
+          uname -a
+          test "$(uname -m)" = arm64
+          python3 --version
+          xcodebuild -version
+          xcode-select -p
+          xcrun --find clang
+          xcrun --sdk macosx --show-sdk-path
+          df -h /
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      # pinned 源码：core 6 条 + feeds 8 条，commit 由 sources.lock.json 钉死（16 条）
+      - name: Fetch pinned sources (core)
+        run: python3 scripts/sources.py fetch --group core
+      - name: Fetch pinned sources (feeds)
+        run: python3 scripts/sources.py fetch --group feeds
+
+      # patches 应用在 fetch 之后（bringup.yml:142-144 同序），脚本自带幂等与 sha 校验
+      - name: Apply patches
+        run: python3 scripts/apply_patches.py
+
+      # XNU 构建需要 llvm-* 工具家族、unifdef、dtc、cmake、ninja（bringup.yml:146 同款）
+      - name: Install build tools
+        run: brew install cmake ninja unifdef llvm lld dtc
+
+      # 固化 Xcode：镜像默认版本漂移时仍选 27.1（macosx27.0 SDK 的提供者）
+      - name: Select Xcode 27.1 if present
+        run: |
+          if [ -d /Applications/Xcode_27.1.app ]; then
+            sudo xcode-select -s /Applications/Xcode_27.1.app
+            echo "selected /Applications/Xcode_27.1.app"
+          else
+            echo "Xcode_27.1.app absent; keeping default $(xcode-select -p)"
+          fi
+
+      # 三道门禁断言：失败即停，避免用错 Xcode 空跑 30-60 分钟
+      - name: Verify toolchain identity
+        run: |
+          mkdir -p out/reference-xnu
+          { xcodebuild -version; xcrun clang --version; \
+            xcrun --sdk macosx --show-sdk-version; xcrun --sdk iphoneos --show-sdk-version; } \
+            | tee out/reference-xnu/toolchain.txt
+          test "$(xcrun --sdk macosx --show-sdk-version)" = 27.0
+          python3 - <<'PY'
+          import subprocess
+          major = subprocess.check_output(['xcodebuild','-version'], text=True).splitlines()[0].split()[1].split('.')[0]
+          ios = subprocess.check_output(['xcrun','--sdk','iphoneos','--show-sdk-version'], text=True).strip()
+          assert major == '27', f'Xcode major {major} != 27'
+          assert int(ios.split('.')[0]) >= 17, f'iPhoneOS SDK {ios} < 17'
+          print('toolchain gate OK', major, ios)
+          PY
+
+      # 缓存：命中后 975 TU 变增量（历史 5m45s vs 冷轮 25-60min）
+      - name: Restore source/build cache
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            .cache/
+            build/
+            out/reference-xnu/work/sheng/tree/.cache/
+            out/reference-xnu/work/sheng/tree/build/
+          key: minimal-kernel-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('sources.lock.json', 'patches/**', 'config/reference-xnu*', 'scripts/build_reference_xnu.py') }}
+
+      - name: Build reference XNU
+        run: python3 scripts/build_reference_xnu.py -j "${{ inputs.jobs }}"
+
+      - name: Save source/build cache
+        if: always() && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .cache/
+            build/
+            out/reference-xnu/work/sheng/tree/.cache/
+            out/reference-xnu/work/sheng/tree/build/
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
+      - name: Upload kernel.macho
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-macho-${{ github.run_number }}
+          path: |
+            out/reference-xnu/kernel.macho
+            out/reference-xnu/build.json
+            out/reference-xnu/kernel-audit.json
+            out/reference-xnu/restored-headers.json
+            out/reference-xnu/toolchain.txt
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-logs-${{ github.run_number }}
+          path: |
+            out/reference-xnu/work/sheng/logs/
+          if-no-files-found: warn
+          retention-days: 7
