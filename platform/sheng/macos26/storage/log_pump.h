@@ -28,6 +28,10 @@
  *   native_ufs_log_write     UniXNU/drivers/NativeUfs/NativeUfs.cpp:1159
  *   native_ufs_log_sync      UniXNU/drivers/NativeUfs/NativeUfs.cpp:1189
  */
+/* The pane and the retained ring are written by these two, not by IOLog: the visible
+ * "SHENG:" lines come from sheng_log_stage(), which also appends to the ring. IOLog reaches
+ * neither, which is why every diagnostic so far was invisible. */
+extern "C" void sheng_log_stage (const char *message);
 extern "C" unsigned sheng_log_snapshot_copy (void *destination, unsigned bytes);
 extern "C" int native_ufs_log_open (uint64_t *firstLba, uint64_t *blocks, const char **why);
 extern "C" int native_ufs_log_write (uint64_t rel, uint32_t blocks, const void *src);
@@ -59,7 +63,8 @@ void logPumpThread (void *, wait_result_t)
    * would be scrolled away long before the failure that matters. */
   while (!native_ufs_log_open (&first, &blocks, &why)) {
     ++tries;
-    IOLog ("logpump: refused %s (try %u)\n", why ? why : "?", tries);
+    sheng_log_stage ("logpump: refused");
+    sheng_log_stage (why ? why : "why unknown");
     /* The console keeps only the last few lines, so a printed refusal is unreadable by
      * the time it matters. Panic instead: the reason then lands in PANIC DETAIL, the one
      * pane that survives. 15 tries is 30 s, far past the root layout. */
@@ -68,11 +73,10 @@ void logPumpThread (void *, wait_result_t)
     IOSleep (kLogPumpPeriodMs);
   }
   if (blocks < kLogPumpBlocks) {
-    IOLog ("logpump: window too small blocks=%llu need=%u\n", (unsigned long long) blocks, kLogPumpBlocks);
+    sheng_log_stage ("logpump: window too small");
     return;
   }
-  IOLog ("logpump: armed first=%llu blocks=%llu snapshot=%u\n",
-         (unsigned long long) first, (unsigned long long) blocks, kLogPumpSnapshotBytes);
+  sheng_log_stage ("logpump: armed");
 
   for (;;) {
     const unsigned copied = sheng_log_snapshot_copy (gLogPumpStage, kLogPumpSnapshotBytes);
@@ -80,7 +84,7 @@ void logPumpThread (void *, wait_result_t)
       /* Either the writer held the ring, or the size constant disagrees with sizeof(*r). */
       gLogPumpSnapshotSkips = gLogPumpSnapshotSkips + 1;
       if (gLogPumpSnapshotSkips == 1)
-        IOLog ("logpump: snapshot unavailable (copied %u of %u)\n", copied, kLogPumpSnapshotBytes);
+        sheng_log_stage ("logpump: snapshot size mismatch");
       /* 10 s of an unchanged mismatch means the ring layout and kLogPumpSnapshotBytes
        * disagree, which nothing at runtime can fix. Same visibility reasoning as above. */
       if (gLogPumpSnapshotSkips == 5)
@@ -95,7 +99,7 @@ void logPumpThread (void *, wait_result_t)
       } else {
         gLogPumpWriteErrors = gLogPumpWriteErrors + 1;
         if (gLogPumpWriteErrors == 1)
-          IOLog ("logpump: write failed rounds=%llu\n", (unsigned long long) gLogPumpRounds);
+          sheng_log_stage ("logpump: write failed");
       }
     }
     IOSleep (kLogPumpPeriodMs);
@@ -113,13 +117,13 @@ static void logPumpStart (void)
   if (__atomic_exchange_n (&gLogPumpStarted, 1, __ATOMIC_ACQ_REL)) return;
   gLogPumpStage = static_cast<uint8_t *> (IOMallocAligned (kLogPumpBlocks * kLogPumpBlock, kLogPumpBlock));
   if (!gLogPumpStage) {
-    IOLog ("logpump: stage allocation failed\n");
+    sheng_log_stage ("logpump: stage allocation failed");
     return;
   }
   bzero (gLogPumpStage, kLogPumpBlocks * kLogPumpBlock);
   thread_t thread = nullptr;
   if (kernel_thread_start (logPumpThread, nullptr, &thread) != KERN_SUCCESS) {
-    IOLog ("logpump: thread start failed\n");
+    sheng_log_stage ("logpump: thread start failed");
     IOFreeAligned (gLogPumpStage, kLogPumpBlocks * kLogPumpBlock);
     gLogPumpStage = nullptr;
     __atomic_store_n (&gLogPumpStarted, 0, __ATOMIC_RELEASE);
