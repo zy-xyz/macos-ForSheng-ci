@@ -16,7 +16,6 @@
 
 #include <IOKit/IOLib.h>
 #include <kern/thread.h>
-#include <kern/misc_protos.h>
 #include <string.h>
 
 /* Signatures copied verbatim from their definitions, not from any design note:
@@ -103,7 +102,7 @@ static void logPumpStart (void)
   }
   bzero (gLogPumpStage, kLogPumpBlocks * kLogPumpBlock);
   thread_t thread = nullptr;
-  if (kernel_thread_start_priority (logPumpThread, nullptr, BASEPRI_KERNEL, &thread) != KERN_SUCCESS) {
+  if (kernel_thread_start (logPumpThread, nullptr, &thread) != KERN_SUCCESS) {
     IOLog ("logpump: thread start failed\n");
     IOFreeAligned (gLogPumpStage, kLogPumpBlocks * kLogPumpBlock);
     gLogPumpStage = nullptr;
