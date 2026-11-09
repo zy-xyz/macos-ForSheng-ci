@@ -49,11 +49,14 @@ void logPumpThread (void *, wait_result_t)
 {
   uint64_t first = 0, blocks = 0;
   const char *why = "";
-  if (!native_ufs_log_open (&first, &blocks, &why)) {
-    /* The reason string is the whole point: off / no root layout / reserve too small for the log /
-     * overlaps the root image / window refused / already open. */
-    IOLog ("logpump: refused %s\n", why ? why : "?");
-    return;
+  unsigned tries = 0;
+  /* Retry instead of giving up: the same call path fills the root layout, and repeating the
+   * refusal keeps the reason at the bottom of the panel console. A single line printed here
+   * would be scrolled away long before the failure that matters. */
+  while (!native_ufs_log_open (&first, &blocks, &why)) {
+    ++tries;
+    IOLog ("logpump: refused %s (try %u)\n", why ? why : "?", tries);
+    IOSleep (kLogPumpPeriodMs);
   }
   if (blocks < kLogPumpBlocks) {
     IOLog ("logpump: window too small blocks=%llu need=%u\n", (unsigned long long) blocks, kLogPumpBlocks);
