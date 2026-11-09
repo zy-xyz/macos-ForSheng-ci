@@ -154,8 +154,14 @@ def build(root, out, compile_record, source, run, record, env, *, transport='vir
             elif arg not in ('-MMD', '-MD', '-MP'):
                 log_command.append(arg)
             index += 1
+        # BootLog.c includes <kern/misc_protos.h> (bsd/kern) and <kern/thread.h> (osfmk); the record
+        # above only carries the osfmk tree, so add the BSD and libkern roots the board builder gets
+        # from its own xnu work tree.
         log_command[1:1] = ['-x', 'c', '-std=gnu11', '-Wno-unused-command-line-argument',
-                            '-I', str(root / 'UniXNU-sheng/package')]
+                            '-I', str(root / 'UniXNU-sheng/package'),
+                            '-I', str(source / 'bsd'),
+                            '-I', str(source / 'libkern'),
+                            '-I', str(source / 'osfmk')]
         run(log_command, directory + '-bootlog-compile', record, cwd=Path(compile_record['directory']), env=env)
         objects.append(str(boot_log_object))
         boot_log = dict(source='UniXNU-sheng/package/BootLog.c',
