@@ -568,6 +568,106 @@ def compile_sources(args, record: dict) -> None:
             save(record)
 
 
+def build_gpu_archives(record, env):
+    """Stage a unixnu-shaped tree and run the board's GPU archive builders.
+
+    The macOS 26 chain compiles its own source archive and links a hand-written list, so no device
+    tree is ever assembled. NativeAdreno and NativeLegacyDisplay are board modules: their builders
+    locate ROOT from their own real path and expect drivers/ kits/ build/xnu/ios-obj/ under it.
+    This stages that layout pointed at this chain's object directory and runs only the GPU entries.
+    Returns (adreno_archive, legacy_archive), or (None, None) when a builder produced no archive.
+    """
+    import os as _os
+    import shutil as _shutil
+    import sys as _sys
+
+    device = ROOT / 'UniXNU-sheng'
+    source = ROOT / 'UniXNU'
+    tree = OUT / 'gpu-tree'
+    _shutil.rmtree(tree, ignore_errors=True)
+    (tree / 'scripts').mkdir(parents=True)
+    # Scripts are copied, not linked: each resolves ROOT from its own real path.
+    for base in (source / 'scripts', device / 'scripts'):
+        if base.is_dir():
+            for path in sorted(base.glob('*.py')):
+                _shutil.copy2(path, tree / 'scripts' / path.name)
+    for kind in ('drivers', 'kits', 'patches'):
+        (tree / kind).mkdir(parents=True, exist_ok=True)
+        for base in (source / kind, device / kind):
+            if not base.is_dir():
+                continue
+            for path in sorted(base.iterdir()):
+                target = tree / kind / path.name
+                if target.exists() or target.is_symlink():
+                    continue
+                target.symlink_to(path.resolve())
+    for name in ('refer', 'package'):
+        base = source / name
+        if base.exists():
+            (tree / name).symlink_to(base.resolve())
+    # board.toml declares kit = "sheng": the device package/ appears as kits/sheng in the tree,
+    # and build-native-adreno-kits.py compiles kits/sheng/{ShengGmu,ShengGmuVotes,ShengGmuCommandDb}.c.
+    if (device / 'package').is_dir() and not (tree / 'kits/sheng').exists():
+        (tree / 'kits/sheng').symlink_to((device / 'package').resolve())
+    # The builders read this chain's compilation records under build/xnu/ios-obj.
+    (tree / 'build/xnu').mkdir(parents=True)
+    (tree / 'build/xnu/ios-obj').symlink_to((OUT / 'obj').resolve())
+    # Kernel headers, pinned Adreno sources and firmware the audits and planners read.
+    # This chain keeps the XNU source in OUT/source and the kernel SDK in OUT/kernel-sdk,
+    # while the board builders look for them under .cache/xnu-work and .cache/fakeroot.
+    cache = tree / '.cache'
+    cache.mkdir()
+    for link, target in (('xnu-work', OUT / 'source'), ('fakeroot', OUT / 'kernel-sdk'),
+                         ('adreno-source', device / '.cache' / 'adreno-source'),
+                         ('firmware', device / '.cache' / 'firmware'),
+                         ('linux-dts', device / '.cache' / 'linux-dts')):
+        if target.exists():
+            (cache / link).symlink_to(target.resolve())
+
+    build_env = dict(env)
+    build_env['UNIXNU_XNU_OBJ'] = 'build/xnu/ios-obj/DEVELOPMENT_ARM64_SHENG'
+    build_env['UNIXNU_NATIVE_ARCH'] = ARCH
+    build_env['PATH'] = _os.pathsep.join([build_env.get('PATH', ''),
+                                          '/opt/homebrew/opt/llvm/bin', '/opt/homebrew/opt/lld/bin'])
+
+    commands = [
+        ['extract-files.py', '--device', str(device)],
+        ['fetch-adreno-inputs.py'],
+        ['fetch-sheng-dts.py'],
+        ['prepare-sheng-gmu.py'],
+        ['prepare-sheng-gmu-votes.py'],
+        ['audit-mobile-graphics-legacy.py'],
+        ['audit-target-accelerator-base.py'],
+        ['build-arm-driver.py', 'NativeAdreno'],
+        ['build-native-adreno-kits.py'],
+        ['build-native-adreno-accelerator.py'],
+        ['build-native-legacy-display.py'],
+    ]
+    logs = OUT / 'gpu-logs'
+    logs.mkdir(parents=True, exist_ok=True)
+    for index, command in enumerate(commands, 1):
+        script = tree / 'scripts' / command[0]
+        if not script.is_file():
+            raise ValueError(f'GPU builder missing from the staged tree: {script}')
+        log = logs / f'gpu-{index:02d}-{command[0]}.log'
+        with log.open('w') as stream:
+            completed = subprocess.run([_sys.executable, str(script), *command[1:]],
+                                       cwd=tree, env=build_env, stdout=stream,
+                                       stderr=subprocess.STDOUT)
+        if completed.returncode:
+            raise ValueError(f'{command[0]} failed; tail of {log}:\n'
+                             + log.read_text()[-4000:])
+    adreno = tree / 'build/native-adreno/libNativeAdreno.a'
+    legacy = tree / 'build/native-legacy-display/libNativeLegacyDisplay.late.a'
+    record['gpu_archives'] = dict(
+        staged_tree=str(tree),
+        object_directory=build_env['UNIXNU_XNU_OBJ'],
+        adreno=dict(sha256=sha(adreno), bytes=adreno.stat().st_size) if adreno.is_file() else None,
+        legacy=dict(sha256=sha(legacy), bytes=legacy.stat().st_size) if legacy.is_file() else None,
+        builder_logs={p.name: sha(p) for p in sorted(logs.glob('gpu-*.log'))})
+    save(record)
+    return (adreno if adreno.is_file() else None, legacy if legacy.is_file() else None)
+
 def link_kernel(args, record, common, sdk, source, env):
     """Use XNU's executable link recipe; missing native contracts remain errors."""
     record.update(stage='executable-link', link_attempted=True, executable_kernel_built=False)
@@ -603,7 +703,13 @@ def link_kernel(args, record, common, sdk, source, env):
     from build_macos26_crypto import build_provider
     crypto = build_provider(args, record, sdk, source, env)
     crypto_input = '-Wl,-force_load,' + str(crypto) if ARCH == 'arm64e' else str(crypto)
+    gpu_adreno_archive, gpu_legacy_archive = build_gpu_archives(record, env)
     archives = [crypto_input, str(OUT / 'ArmDTPlatform.o'), str(OUT / 'ArmCpu.o'), str(firehose)]
+    # B1: the GPU archives come from the board builders staged by build_gpu_archives();
+    # they live under the assembled tree, not under OUT, because the builders locate it from their path.
+    for extra in (gpu_adreno_archive, gpu_legacy_archive):
+        if extra and Path(extra).is_file():
+            archives.append('-Wl,-force_load,' + str(extra))
     native_link_flags = ('-Wl,-headerpad,0x2000 -Wl,-map,'
                          + str(OUT / 'kernel.development.sheng.map'))
     run(common + ['build', 'BUILD_STATIC_LINK=1', 'BUILD_XNU_LIBRARY=0',
