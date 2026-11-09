@@ -133,21 +133,33 @@ jobs:
           git clone --filter=blob:none https://github.com/steelbrain/metal2vulkan UniXNU/.cache/gpu-reference/metal2vulkan
           git -C UniXNU/.cache/gpu-reference/metal2vulkan checkout "$M2V_COMMIT"
 
-      - name: Align the NativeAdreno hostsim fixture
+      - name: Complete the NativeAdreno hostsim fixture
         # The pinned submodule commit (cedcaa2) has NativeAdrenoMemory.cpp using IODirection and
         # kIOMemoryPersistent while tests/XnuMemoryFixture.h still lacks both, so the hostsim does
-        # not compile. Upstream 6fa7bae carries the matching fixture. This affects only the host
-        # simulation (a test double); the iOS plugin bundle and the kernel are untouched.
+        # not compile. Bumping the submodule is not an option: newer commits also need a newer
+        # ArmSmmu4K kit (ArmSmmu4KTablePages). Add only the two missing test-double declarations;
+        # this touches the host simulation only, never the iOS plugin bundle or the kernel.
+        if: inputs.build_host_smoke
         run: |
           set -euo pipefail
-          if [ "${{ inputs.build_host_smoke }}" = "true" ]; then
-            git -C UniXNU/drivers/NativeAdreno fetch --depth 1 origin 6fa7bae2a5b3b523e790eb3e0348af4d98969e4d
-            git -C UniXNU/drivers/NativeAdreno checkout 6fa7bae2a5b3b523e790eb3e0348af4d98969e4d
-            grep -c 'kIOMemoryPersistent' UniXNU/drivers/NativeAdreno/tests/XnuMemoryFixture.h
-          else
-            echo 'host smoke disabled: leaving the pinned fixture as is'
+          F=UniXNU/drivers/NativeAdreno/tests/XnuMemoryFixture.h
+          if ! grep -q 'kIOMemoryPersistent' "$F"; then
+            python3 - "$F" <<'PY'
+          import sys
+          from pathlib import Path
+          p = Path(sys.argv[1])
+          text = p.read_text()
+          anchor = 'constexpr unsigned kIODirectionOut=2,kIODirectionInOut=3'
+          assert anchor in text, 'fixture layout changed'
+          text = text.replace(anchor, 'using IODirection=unsigned;' + chr(10) + anchor, 1)
+          text = text.replace('kIOMemoryPhysicallyContiguous=0x10;',
+                              'kIOMemoryPhysicallyContiguous=0x10,kIOMemoryPersistent=0x10000;', 1)
+          p.write_text(text)
+          print('fixture completed')
+          PY
           fi
-
+          grep -n 'IODirection' "$F"
+          grep -n 'kIOMemoryPersistent' "$F"
       - name: Build Turnip (host) for the replay recorder
         if: inputs.build_host_smoke
         run: python3 UniXNU/scripts/build-turnip-darwin.py --target host
