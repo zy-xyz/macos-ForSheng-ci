@@ -1,0 +1,29 @@
+diff --git a/drivers/NativeUfs/NativeUfs.cpp b/drivers/NativeUfs/NativeUfs.cpp
+index 0921abd..e16efdc 100755
+--- a/drivers/NativeUfs/NativeUfs.cpp
++++ b/drivers/NativeUfs/NativeUfs.cpp
+@@ -1000,6 +1000,12 @@ static uint32_t be32w (const uint8_t *at)
+ #include NATIVE_MACOSLOG_WORKER
+ #endif
+ 
++// Diagnostic log pump: the RAM console ring is already filled by patch 0013's
++// sheng_log_putc() hooks; this only drains it into userdata's last 32 MiB every 2 s.
++// It does not touch the LUN 4 macoslog path, so ufsPrepareRootWindows()'s validate gate
++// is irrelevant here. Off unless sheng-log=1 (native_ufs_log_open() checks it).
++#include "../../../platform/sheng/macos26/storage/log_pump.h"
++
+ // ---- Persistent Data store window (sheng-data-persist) ----------------------------------------------------------
+ // The only part of this driver that ever writes. The consumer (NativeRamBlock's overlay) asks for a window of the given
+ // size at the END of the userdata partition. Mode 1 (boot argument sheng-data-persist=1) only reads: it proves the window and
+@@ -1966,6 +1972,11 @@ bool NativeUfs::startRoot (IOService *provider)
+   }
+   gStoreGeometry = { true, layout->userdataFirst, layout->userdataLast, layout->imageBytes, layout->gptEntriesLba,
+                      layout->gptHeaderCrc, layout->gptEntriesCrc, layout->gptEntryCount };
++  // Start the diagnostic log pump here and only here: gStoreGeometry is filled, hostBringUp()
++  // already set gHost.ready, and no identity gate has run yet. ufsRecoveryRootIdentity() below
++  // is the root-pairing gate; a refused pump must not depend on it, because a pairing failure
++  // is exactly the case whose diagnostics matter most.
++  logPumpStart ();
+ #if defined(NATIVE_UFS_RECOVERY_ROOT) && NATIVE_UFS_RECOVERY_ROOT
+   bool paired = layout->windows >= 1 && layout->windows <= 2;
+   for (unsigned i = 0; paired && i < layout->windows; ++i)
