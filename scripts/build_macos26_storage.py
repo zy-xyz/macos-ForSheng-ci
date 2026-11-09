@@ -134,6 +134,44 @@ def build(root, out, compile_record, source, run, record, env, *, transport='vir
         run(input_command, directory + '-input-compile', record,
             cwd=Path(compile_record['directory']), env=env)
         objects.append(str(input_object))
+
+    # t107: the board's unattended-run reset (BootReset.c) rides in this bundle. It is C, not
+    # C++, so the NativeUfs compile command is reused with the language and standard switched
+    # and the C++-only options dropped. BootResetCore.h lives beside the source, so one extra
+    # include directory covers it; everything else (kern/thread.h, IOKit/IOLib.h,
+    # pexpert/pexpert.h, machine/machine_routines.h) comes from the staged kernel headers
+    # already on the command line.
+    if transport == 'ufs':
+        package = root / 'UniXNU-sheng/package'
+        reset_source = package / 'BootReset.c'
+        if not reset_source.is_file():
+            raise ValueError('BootReset.c is missing from ' + str(package))
+        reset_obj = destination / 'BootReset.o'
+        reset_command = []
+        index = 0
+        while index < len(command):
+            arg = command[index]
+            if arg == str(wrapper):
+                reset_command.append(str(reset_source))
+            elif arg == str(obj):
+                reset_command.append(str(reset_obj))
+            elif arg == '-xc++':
+                reset_command += ['-x', 'c']
+            elif arg == '--driver-mode=g++':
+                pass
+            elif arg == '-std=gnu++2b':
+                reset_command.append('-std=gnu11')
+            elif arg in ('-fsized-deallocation', '-fc++-static-destructors=none'):
+                pass
+            else:
+                reset_command.append(arg)
+            index += 1
+        # -Werror is on for the driver; the board sources are warning-clean upstream but keep
+        # the same policy so a regression is visible rather than silently tolerated.
+        reset_command += ['-I', str(package)]
+        run(reset_command, directory + '-reset-compile', record,
+            cwd=Path(compile_record['directory']), env=env)
+        objects.append(str(reset_obj))
     binary = destination / (component + '.macho')
     run(['xcrun', 'ld', '-arch', 'arm64e', '-kext', '-kexts_use_stubs',
          '-platform_version', 'macos', '26.5', '26.5',
