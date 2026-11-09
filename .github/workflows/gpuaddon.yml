@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       build_host_smoke:
-        description: Also build the host Turnip + hostsim (required by gen-turnip-replay.py)
+        description: Also build the host Turnip + hostsim and record the replay (needs an upstream fixture fix; see notes)
         type: boolean
-        default: true
+        default: false
       jobs:
         description: ninja/make parallel jobs
         type: number
@@ -123,6 +123,10 @@ jobs:
         run: python3 UniXNU/scripts/gen-turnip-smoke-shaders.py
 
       - name: Record Turnip's first submission (host simulation)
+        # TurnipReplay.h is optional in the plugin (drivers/NativeAdreno/NativeAdrenoUserTest.h:17 uses __has_include),
+        # so the plugin builds without it. The hostsim at the pinned NativeAdreno commit does not compile:
+        # tests/XnuMemoryFixture.h lacks IODirection/kIOMemoryPersistent that NativeAdrenoMemory.cpp:167 uses.
+        # Upstream 6fa7bae fixes that fixture; bump the submodule to enable this step.
         if: inputs.build_host_smoke
         run: python3 UniXNU/scripts/gen-turnip-replay.py
 
@@ -142,9 +146,9 @@ jobs:
       - name: Summarize
         if: always()
         run: |
-          echo "== bundle =="; find UniXNU/build/adreno-metal-plugin -maxdepth 2 -type f -exec stat -f '%z %N' {} \; 2>/dev/null | head -20
-          echo "== turnip =="; ls -l UniXNU/build/mesa-tu-ios/src/freedreno/vulkan/libvulkan_freedreno.dylib 2>/dev/null
-          echo "== trust =="; cat UniXNU/build/adreno-metal-plugin/trust.json 2>/dev/null
+          echo "== bundle =="; (find UniXNU/build/adreno-metal-plugin -maxdepth 2 -type f -exec stat -f '%z %N' {} \; 2>/dev/null || true) | head -20
+          echo "== turnip =="; ls -l UniXNU/build/mesa-tu-ios/src/freedreno/vulkan/libvulkan_freedreno.dylib 2>/dev/null || true
+          echo "== trust =="; cat UniXNU/build/adreno-metal-plugin/trust.json 2>/dev/null || true
 
       - name: Upload the plugin bundle and addon
         if: always()
