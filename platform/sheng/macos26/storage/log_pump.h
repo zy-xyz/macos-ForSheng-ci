@@ -78,6 +78,28 @@ void logPumpThread (void *, wait_result_t)
   }
   sheng_log_stage ("logpump: armed");
 
+  /* One immediate attempt with a report after every step. mount-phase-1 fails about five
+   * seconds in, so the 2 s loop never gets far enough to say which step breaks. */
+  {
+    const unsigned copied = sheng_log_snapshot_copy (gLogPumpStage, kLogPumpSnapshotBytes);
+    if (copied != kLogPumpSnapshotBytes) {
+      sheng_log_stage ("logpump: snapshot short");
+      if (copied == 0) sheng_log_stage ("logpump: copied zero");
+      else sheng_log_stage ("logpump: copied partial");
+    } else {
+      sheng_log_stage ("logpump: snapshot ok");
+      if (copied % kLogPumpBlock)
+        memset (gLogPumpStage + copied, 0, kLogPumpBlocks * kLogPumpBlock - copied);
+      if (native_ufs_log_write (0, kLogPumpBlocks, gLogPumpStage)) {
+        sheng_log_stage ("logpump: write ok");
+        if (native_ufs_log_sync ()) sheng_log_stage ("logpump: sync ok");
+        else sheng_log_stage ("logpump: sync failed");
+      } else {
+        sheng_log_stage ("logpump: write failed");
+      }
+    }
+  }
+
   for (;;) {
     const unsigned copied = sheng_log_snapshot_copy (gLogPumpStage, kLogPumpSnapshotBytes);
     if (copied != kLogPumpSnapshotBytes) {
