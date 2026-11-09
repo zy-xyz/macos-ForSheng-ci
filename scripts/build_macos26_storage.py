@@ -154,13 +154,14 @@ def build(root, out, compile_record, source, run, record, env, *, transport='vir
             elif arg not in ('-MMD', '-MD', '-MP'):
                 log_command.append(arg)
             index += 1
-        # BootLog.c includes <kern/misc_protos.h> (bsd/kern) and <kern/thread.h> (osfmk); the record
-        # above only carries the osfmk tree, so add the BSD and libkern roots the board builder gets
-        # from its own xnu work tree.
+        # BootLog.c needs <kern/thread.h>, <kern/clock.h>, <kern/misc_protos.h> (all under osfmk/kern)
+        # and <pexpert/pexpert.h> (top-level pexpert/pexpert). The record above carries only the iokit
+        # and export header trees, so add exactly those two roots. Adding <source>/bsd would let
+        # <libkern/libkern.h> resolve to bsd/libkern/libkern.h and collide with the osfmk declaration
+        # of copyinstr, so it stays out.
         log_command[1:1] = ['-x', 'c', '-std=gnu11', '-Wno-unused-command-line-argument',
                             '-I', str(root / 'UniXNU-sheng/package'),
-                            '-I', str(source / 'bsd'),
-                            '-I', str(source / 'libkern'),
+                            '-I', str(source),
                             '-I', str(source / 'osfmk')]
         run(log_command, directory + '-bootlog-compile', record, cwd=Path(compile_record['directory']), env=env)
         objects.append(str(boot_log_object))
