@@ -1,0 +1,154 @@
+# gpuaddon.yml —— 在 macOS runner 上构建 NGPUADD2 Adreno Metal 插件包
+# 来源：t90。所有步骤都是 UniXNU 仓库内已有脚本，本 workflow 只做编排。
+name: gpu addon (NGPUADD2)
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_host_smoke:
+        description: Also build the host Turnip + hostsim (required by gen-turnip-replay.py)
+        type: boolean
+        default: true
+      jobs:
+        description: ninja/make parallel jobs
+        type: number
+        default: 4
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gpuaddon-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  HOMEBREW_NO_AUTO_UPDATE: 1
+  HOMEBREW_NO_INSTALL_CLEANUP: 1
+  UNIXNU_COMMIT: fb6aad6ab1f50199a4d99d2da1d0ca403b067633
+  MESA_COMMIT: 85fda3b36405bcaea8bffc64aa4f2651dc90770d
+  M2V_COMMIT: 720ef1ce9ae2a2068999a8675717418b9416283e
+
+jobs:
+  plugin:
+    runs-on: xcode-27
+    timeout-minutes: 300
+    steps:
+      - name: Environment probe
+        run: |
+          uname -a
+          test "$(uname -m)" = arm64
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+          python3 --version
+
+      - name: Check out the CI repo (scripts, patches, config)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install host tools
+        run: |
+          brew install ninja cmake glslang shaderc spirv-tools llvm bison pkg-config
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
+
+      - name: Fetch pinned UniXNU
+        run: |
+          git clone --filter=blob:none https://github.com/UniXNU/UniXNU.git UniXNU
+          git -C UniXNU checkout "$UNIXNU_COMMIT"
+          git -C UniXNU submodule update --init --recursive --depth 1 -- jobs 4 || \
+            git -C UniXNU submodule update --init --recursive
+          git -C UniXNU log -1 --format='%H %s'
+
+      - name: Fetch pinned Mesa (sparse) and apply the recorded patches
+        run: |
+          set -euo pipefail
+          MIRROR=https://chromium.googlesource.com/external/gitlab.freedesktop.org/mesa/mesa
+          SRC=UniXNU/.cache/mesa-work
+          mkdir -p "$(dirname "$SRC")"
+          git clone --filter=blob:none --no-checkout "$MIRROR" "$SRC"
+          git -C "$SRC" sparse-checkout init --cone
+          python3 - <<'PY' > /tmp/sparse.txt
+          import json
+          d = json.load(open('UniXNU/scripts/data/adreno-compiler-inputs.json'))
+          print('\n'.join(d['mesa']['sparse_directories']))
+          PY
+          git -C "$SRC" sparse-checkout set $(tr '\n' ' ' < /tmp/sparse.txt)
+          git -C "$SRC" checkout "$MESA_COMMIT"
+          git -C "$SRC" rev-parse HEAD
+          python3 - <<'PY'
+          import json, subprocess
+          pins = json.load(open('UniXNU/scripts/data/adreno-compiler-inputs.json'))
+          for p in pins['patches']:
+              subprocess.run(['git','-C','UniXNU/.cache/mesa-work','apply','UniXNU/'+p], check=True)
+              print('applied', p)
+          PY
+          git -C "$SRC" diff --stat | tail -3
+
+      - name: Create the Mesa build venv (meson)
+        run: |
+          python3 -m venv UniXNU/.cache/mesa-venv
+          UniXNU/.cache/mesa-venv/bin/pip install -q --upgrade pip
+          UniXNU/.cache/mesa-venv/bin/pip install -q -r UniXNU/scripts/requirements-adreno-compiler.txt
+          UniXNU/.cache/mesa-venv/bin/meson --version
+          mkdir -p UniXNU/.cache/mesa-tools/bin
+          ln -sf "$(command -v bison)" UniXNU/.cache/mesa-tools/bin/bison
+
+      - name: Install the pinned Rust toolchain for the Metal bridge
+        run: |
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup run 1.98.0 cargo --version
+
+      - name: Fetch the pinned metal2vulkan translator
+        run: |
+          git clone --filter=blob:none https://github.com/steelbrain/metal2vulkan UniXNU/.cache/gpu-reference/metal2vulkan
+          git -C UniXNU/.cache/gpu-reference/metal2vulkan checkout "$M2V_COMMIT"
+
+      - name: Build Turnip (host) for the replay recorder
+        if: inputs.build_host_smoke
+        run: python3 UniXNU/scripts/build-turnip-darwin.py --target host
+
+      - name: Build Turnip (iOS) — the plugin's Vulkan driver
+        run: python3 UniXNU/scripts/build-turnip-darwin.py --target ios
+
+      - name: Compile the Turnip smoke shaders
+        run: python3 UniXNU/scripts/gen-turnip-smoke-shaders.py
+
+      - name: Record Turnip's first submission (host simulation)
+        if: inputs.build_host_smoke
+        run: python3 UniXNU/scripts/gen-turnip-replay.py
+
+      - name: Build the native Metal bridge (arm64-apple-ios17.0)
+        run: python3 UniXNU/scripts/build-native-metal-bridge.py --target ios
+
+      - name: Build the Adreno Metal plugin bundle
+        run: python3 UniXNU/scripts/build-adreno-metal-plugin.py
+
+      - name: Pack the NGPUADD2 addon
+        run: |
+          python3 UniXNU/scripts/make-gpu-addon.py \
+            --publish --clients RenderServer,WindowServer \
+            /tmp/NativeAdrenoMetal.gpuaddon
+          ls -l /tmp/NativeAdrenoMetal.gpuaddon
+
+      - name: Summarize
+        if: always()
+        run: |
+          echo "== bundle =="; find UniXNU/build/adreno-metal-plugin -maxdepth 2 -type f -printf '%p %s\n' 2>/dev/null | head -20
+          echo "== turnip =="; ls -l UniXNU/build/mesa-tu-ios/src/freedreno/vulkan/libvulkan_freedreno.dylib 2>/dev/null
+          echo "== trust =="; cat UniXNU/build/adreno-metal-plugin/trust.json 2>/dev/null
+
+      - name: Upload the plugin bundle and addon
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ngpuadd2
+          path: |
+            UniXNU/build/adreno-metal-plugin/**
+            /tmp/NativeAdrenoMetal.gpuaddon
+          if-no-files-found: warn
+          retention-days: 7
