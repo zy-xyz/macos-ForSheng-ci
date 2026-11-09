@@ -67,10 +67,22 @@ jobs:
       - name: Fetch pinned Mesa (sparse) and apply the recorded patches
         run: |
           set -euo pipefail
-          MIRROR=https://chromium.googlesource.com/external/gitlab.freedesktop.org/mesa/mesa
           SRC=UniXNU/.cache/mesa-work
           mkdir -p "$(dirname "$SRC")"
-          git clone --filter=blob:none --no-checkout "$MIRROR" "$SRC"
+          # Two mirrors, each retried: googlesource intermittently drops the pack stream ("early EOF").
+          for attempt in 1 2 3; do
+            for MIRROR in https://chromium.googlesource.com/external/gitlab.freedesktop.org/mesa/mesa \
+                          https://gitlab.freedesktop.org/mesa/mesa; do
+              rm -rf "$SRC"
+              if git -c http.postBuffer=524288000 -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 \
+                     clone --filter=blob:none --no-checkout "$MIRROR" "$SRC"; then
+                echo "cloned from $MIRROR (attempt $attempt)"
+                break 2
+              fi
+              echo "clone failed from $MIRROR (attempt $attempt)" >&2
+            done
+          done
+          test -d "$SRC/.git" || { echo 'mesa clone failed from every mirror' >&2; exit 1; }
           git -C "$SRC" sparse-checkout init --cone
           python3 - <<'PY' > /tmp/sparse.txt
           import json
