@@ -18,6 +18,10 @@
 #include <kern/thread.h>
 #include <string.h>
 
+/* <kern/misc_protos.h> is C-only and cannot be parsed from this C++ unit, so declare the one
+ * prototype the diagnostics need. panic() is noreturn and prints to the console and QR. */
+extern "C" void panic (const char *, ...) __attribute__((noreturn));
+
 /* Signatures copied verbatim from their definitions, not from any design note:
  *   sheng_log_snapshot_copy  platform/sheng/macos26/log/retained_log.h:119
  *   native_ufs_log_open      UniXNU/drivers/NativeUfs/NativeUfs.cpp:1130
@@ -56,6 +60,11 @@ void logPumpThread (void *, wait_result_t)
   while (!native_ufs_log_open (&first, &blocks, &why)) {
     ++tries;
     IOLog ("logpump: refused %s (try %u)\n", why ? why : "?", tries);
+    /* The console keeps only the last few lines, so a printed refusal is unreadable by
+     * the time it matters. Panic instead: the reason then lands in PANIC DETAIL, the one
+     * pane that survives. 15 tries is 30 s, far past the root layout. */
+    if (tries == 15)
+      panic ("logpump: refused %s", why ? why : "?");
     IOSleep (kLogPumpPeriodMs);
   }
   if (blocks < kLogPumpBlocks) {
@@ -72,6 +81,10 @@ void logPumpThread (void *, wait_result_t)
       gLogPumpSnapshotSkips = gLogPumpSnapshotSkips + 1;
       if (gLogPumpSnapshotSkips == 1)
         IOLog ("logpump: snapshot unavailable (copied %u of %u)\n", copied, kLogPumpSnapshotBytes);
+      /* 10 s of an unchanged mismatch means the ring layout and kLogPumpSnapshotBytes
+       * disagree, which nothing at runtime can fix. Same visibility reasoning as above. */
+      if (gLogPumpSnapshotSkips == 5)
+        panic ("logpump: snapshot %u != %u", copied, kLogPumpSnapshotBytes);
     } else {
       /* rel 0 is the window's first block = the first 4096 bytes of userdata's last 32 MiB,
        * so the SHNLOG01 magic is exactly at that offset. Pad the tail of the last block. */
