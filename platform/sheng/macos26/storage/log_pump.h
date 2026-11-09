@@ -16,6 +16,7 @@
 
 #include <IOKit/IOLib.h>
 #include <kern/thread.h>
+#include <kern/misc_protos.h>
 #include <string.h>
 
 /* Signatures copied verbatim from their definitions, not from any design note:
@@ -66,7 +67,8 @@ void logPumpThread (void *, wait_result_t)
     const unsigned copied = sheng_log_snapshot_copy (gLogPumpStage, kLogPumpSnapshotBytes);
     if (copied != kLogPumpSnapshotBytes) {
       /* Either the writer held the ring, or the size constant disagrees with sizeof(*r). */
-      if (++gLogPumpSnapshotSkips == 1)
+      gLogPumpSnapshotSkips = gLogPumpSnapshotSkips + 1;
+      if (gLogPumpSnapshotSkips == 1)
         IOLog ("logpump: snapshot unavailable (copied %u of %u)\n", copied, kLogPumpSnapshotBytes);
     } else {
       /* rel 0 is the window's first block = the first 4096 bytes of userdata's last 32 MiB,
@@ -74,9 +76,11 @@ void logPumpThread (void *, wait_result_t)
       if (copied % kLogPumpBlock)
         memset (gLogPumpStage + copied, 0, kLogPumpBlocks * kLogPumpBlock - copied);
       if (native_ufs_log_write (0, kLogPumpBlocks, gLogPumpStage) && native_ufs_log_sync ()) {
-        gLogPumpRounds++;
-      } else if (++gLogPumpWriteErrors == 1) {
-        IOLog ("logpump: write failed rounds=%llu\n", (unsigned long long) gLogPumpRounds);
+        gLogPumpRounds = gLogPumpRounds + 1;
+      } else {
+        gLogPumpWriteErrors = gLogPumpWriteErrors + 1;
+        if (gLogPumpWriteErrors == 1)
+          IOLog ("logpump: write failed rounds=%llu\n", (unsigned long long) gLogPumpRounds);
       }
     }
     IOSleep (kLogPumpPeriodMs);
