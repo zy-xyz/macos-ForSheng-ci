@@ -1,0 +1,22 @@
+diff --git a/scripts/build-native-adreno-accelerator.py b/scripts/build-native-adreno-accelerator.py
+index 5205a68..9cb85c3 100644
+--- a/scripts/build-native-adreno-accelerator.py
++++ b/scripts/build-native-adreno-accelerator.py
+@@ -5,6 +5,7 @@ probe runs it after the original IOGPUFamily kext has loaded. Same binding recip
+ original constructor, destructor and metaclass addresses from build/gpu-analysis/ioaccelerator-base-abi.json)."""
+ import hashlib
+ import json
++import os
+ from pathlib import Path
+ import struct
+ import subprocess
+@@ -38,7 +39,8 @@ plan = json.loads(plan_path.read_text())
+ if plan['operational_overrides'] or plan['instance_bytes'] != 136 or plan['virtual_entries'] != 168:
+     sys.exit('The audited original base is not the expected 136-byte, 168-entry class without operational overrides')
+ 
+-record = json.loads((ROOT / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/iokit/DEVELOPMENT/IOPlatformExpert.cpo.json').read_text().strip().rstrip(','))
++RECORDS = ROOT / os.environ.get('UNIXNU_XNU_OBJ', 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837')
++record = json.loads((RECORDS / 'iokit/DEVELOPMENT/IOPlatformExpert.cpo.json').read_text().strip().rstrip(','))
+ source = ROOT / 'drivers/NativeAdreno/NativeAdrenoAccelerator.cpp'
+ obj = OUT / 'NativeAdrenoAccelerator.o'
+ cmd, i, args = [], 0, record['arguments']
