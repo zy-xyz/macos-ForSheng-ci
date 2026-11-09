@@ -119,10 +119,14 @@ jobs:
           mkdir -p UniXNU/.cache/mesa-tools/bin
           ln -sf "$(command -v bison)" UniXNU/.cache/mesa-tools/bin/bison
 
-      - name: Install the pinned Rust toolchain for the Metal bridge
+      - name: Install the pinned Rust toolchain and the iOS target
         run: |
           rustup toolchain install 1.98.0 --profile minimal
+          # The bridge cross-builds for aarch64-apple-ios (build-native-metal-bridge.py:77).
+          # Without the std for that target cargo fails with "can't find crate for `core`".
+          rustup target add aarch64-apple-ios --toolchain 1.98.0
           rustup run 1.98.0 cargo --version
+          rustup target list --toolchain 1.98.0 --installed
 
       - name: Fetch the pinned metal2vulkan translator
         run: |
