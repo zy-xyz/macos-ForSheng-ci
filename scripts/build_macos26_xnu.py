@@ -588,9 +588,14 @@ def build_gpu_archives(record, env):
     (tree / 'scripts').mkdir(parents=True)
     # Scripts are copied, not linked: each resolves ROOT from its own real path.
     for base in (source / 'scripts', device / 'scripts'):
-        if base.is_dir():
-            for path in sorted(base.glob('*.py')):
-                _shutil.copy2(path, tree / 'scripts' / path.name)
+        if not base.is_dir():
+            continue
+        for path in sorted(base.rglob('*')):
+            if path.is_dir() or '__pycache__' in path.parts:
+                continue
+            target = tree / 'scripts' / path.relative_to(base)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            _shutil.copy2(path, target)
     for kind in ('drivers', 'kits', 'patches'):
         (tree / kind).mkdir(parents=True, exist_ok=True)
         for base in (source / kind, device / kind):
