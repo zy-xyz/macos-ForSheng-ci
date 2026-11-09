@@ -120,6 +120,47 @@ def build(root, out, compile_record, source, run, record, env, *, transport='vir
                 '-Wno-deprecated-enum-enum-conversion', '-Wno-unnecessary-virtual-specifier']
     run(command, directory + '-compile', record, cwd=Path(compile_record['directory']), env=env)
     objects = [str(obj)]
+
+    # BootLog.c is the board's diagnostic log writer (sheng-log=1): the only code that calls
+    # native_ufs_log_open/write/sync, which this bundle already exports. The board builder
+    # (UniXNU-sheng/scripts/build-native-legacy-display.py) compiles it, but the emit chain never
+    # runs that builder, so every delivered kernel shipped the window API with no writer.
+    boot_log = None
+    if transport == 'ufs':
+        boot_log_source = root / 'UniXNU-sheng/package/BootLog.c'
+        boot_log_object = destination / 'BootLog.o'
+        # The record is a C++ translation unit (IOPlatformExpert.cpo) and BootLog.c is C: drop the
+        # language/std switches and the warning options the board builder also drops, then pin C.
+        log_command, index = [], 0
+        while index < len(arguments):
+            arg = arguments[index]
+            if arg == compile_record['file']:
+                log_command.append(str(boot_log_source))
+            elif arg in ('-o', '-MF', '-MT', '-MQ', '-MJ'):
+                if arg == '-o':
+                    log_command += ['-o', str(boot_log_object)]
+                index += 1
+            elif arg == '-Xclang' and arguments[index + 1].startswith('-W'):
+                index += 1
+            elif arg == '-x':
+                index += 1
+            elif arg.startswith('-W') or arg.startswith('-std='):
+                pass
+            elif arg not in ('-MMD', '-MD', '-MP'):
+                log_command.append(arg)
+            index += 1
+        log_command[1:1] = ['-x', 'c', '-std=gnu11', '-Wno-unused-command-line-argument',
+                            '-I', str(root / 'UniXNU-sheng/package')]
+        run(log_command, directory + '-bootlog-compile', record, cwd=Path(compile_record['directory']), env=env)
+        objects.append(str(boot_log_object))
+        boot_log = dict(source='UniXNU-sheng/package/BootLog.c',
+                        source_sha256=hashlib.sha256(boot_log_source.read_bytes()).hexdigest(),
+                        object_sha256=hashlib.sha256(boot_log_object.read_bytes()).hexdigest(),
+                        # boot_log_buffer is file-scope static, so it is not a linkable symbol.
+                        defines=('boot_log_tick', 'boot_log_export_put', 'boot_log_state',
+                                 'boot_log_first_lba', 'boot_diag_status'),
+                        consumes=('native_ufs_log_open', 'native_ufs_log_write', 'native_ufs_log_sync',
+                                  'native_ufs_export_blocks', 'native_ufs_export_write'))
     if input_driver:
         input_object = destination / 'recovery-input/NativeRecoveryInput.o'
         input_command = [str(input_object) if arg == str(obj) else
@@ -186,6 +227,8 @@ def build(root, out, compile_record, source, run, record, env, *, transport='vir
                     explicit_qemu_scratch_writes=transport == 'virtio',
                     hardware_enable_required=transport == 'ufs', root_transport_read_only=True,
                     original_storage_runtime_qualified=False, hardware_admitted=False)
+    if boot_log:
+        evidence['boot_log'] = boot_log
     if display:
         evidence['native_gop_display'] = display
     if input_driver:

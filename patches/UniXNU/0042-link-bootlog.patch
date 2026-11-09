@@ -1,0 +1,26 @@
+--- a/drivers/NativeUfs/NativeUfs.cpp
++++ b/drivers/NativeUfs/NativeUfs.cpp
+@@ -1112,6 +1112,13 @@
+   return storeMode () == 2 && gStoreRegionBlocks && hostSyncCache () == kIOReturnSuccess;
+ }
+ 
++// BootLog.c (kits/sheng) is linked into this bundle, but the only thing that ticks it in the board
++// build -- the diagnostic page monitor in BootProgress.c -- is not part of this kernel. Start its
++// writer from the component that owns the log window. boot_log_tick() itself gates on sheng-log=1,
++// and its writer thread waits for the root layout before opening, so this point in the sequence is
++// safe and it never writes when the argument is absent.
++extern "C" void boot_log_tick (unsigned now) __attribute__((weak_import));
++
+ // ---- Diagnostic log window (sheng-log=1) --------------------------------------------------------------------------
+ // The board's log writer (kits/sheng BootLog.c) gets the last kLogReserveBlocks of userdata and the kExportBlocks below them, refused
+ // unless the partition holds them clear of the flashed root image plus a 4 MiB guard. Off without the boot argument.
+@@ -2066,6 +2073,8 @@
+ #if defined(NATIVE_MACOSLOG) && NATIVE_MACOSLOG
+   mlStart();
+ #endif
++  // The board page monitor that normally ticks the diagnostic log is not in this kernel.
++  if (&boot_log_tick) boot_log_tick (0);
+   return true;
+ }
+ 
+
