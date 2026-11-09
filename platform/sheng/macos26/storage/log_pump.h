@@ -18,9 +18,9 @@
 #include <kern/thread.h>
 #include <string.h>
 
-/* <kern/misc_protos.h> is C-only and cannot be parsed from this C++ unit, so declare the one
- * prototype the diagnostics need. panic() is noreturn and prints to the console and QR. */
-extern "C" void panic (const char *, ...) __attribute__((noreturn));
+/* ArmCpu.cpp (C++) reaches panic() the same way: pexpert.h is the C++-safe door to it.
+ * Declaring panic() by hand collides with the kernel's own macro and fails to parse. */
+#include <pexpert/pexpert.h>
 
 /* Signatures copied verbatim from their definitions, not from any design note:
  *   sheng_log_snapshot_copy  platform/sheng/macos26/log/retained_log.h:119
