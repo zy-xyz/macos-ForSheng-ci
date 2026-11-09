@@ -82,9 +82,13 @@ jobs:
           git -C "$SRC" rev-parse HEAD
           python3 - <<'PY'
           import json, subprocess
-          pins = json.load(open('UniXNU/scripts/data/adreno-compiler-inputs.json'))
+          from pathlib import Path
+          root = Path('UniXNU').resolve()
+          pins = json.load(open(root / 'scripts/data/adreno-compiler-inputs.json'))
           for p in pins['patches']:
-              subprocess.run(['git','-C','UniXNU/.cache/mesa-work','apply','UniXNU/'+p], check=True)
+              patch = (root / p).resolve()
+              assert patch.is_file(), patch
+              subprocess.run(['git', '-C', str(root / '.cache/mesa-work'), 'apply', str(patch)], check=True)
               print('applied', p)
           PY
           git -C "$SRC" diff --stat | tail -3
@@ -138,7 +142,7 @@ jobs:
       - name: Summarize
         if: always()
         run: |
-          echo "== bundle =="; find UniXNU/build/adreno-metal-plugin -maxdepth 2 -type f -printf '%p %s\n' 2>/dev/null | head -20
+          echo "== bundle =="; find UniXNU/build/adreno-metal-plugin -maxdepth 2 -type f -exec stat -f '%z %N' {} \; 2>/dev/null | head -20
           echo "== turnip =="; ls -l UniXNU/build/mesa-tu-ios/src/freedreno/vulkan/libvulkan_freedreno.dylib 2>/dev/null
           echo "== trust =="; cat UniXNU/build/adreno-metal-plugin/trust.json 2>/dev/null
 
