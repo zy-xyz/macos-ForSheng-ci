@@ -1,16 +1,17 @@
 diff --git a/scripts/fetch-adreno-inputs.py b/scripts/fetch-adreno-inputs.py
-index be9d5f9..2d07a19 100644
+index be9d5f9..89ef4a5 100644
 --- a/scripts/fetch-adreno-inputs.py
 +++ b/scripts/fetch-adreno-inputs.py
-@@ -46,7 +46,10 @@ if __name__ == '__main__':
+@@ -46,7 +46,11 @@ if __name__ == '__main__':
      firmware = pins['firmware']
      for name, expected in firmware['files'].items():
          blob = expected['git_blob_sha1']
 -        url = firmware['repository'].replace('https://github.com/', 'https://api.github.com/repos/') + '/git/blobs/' + blob
-+        # raw.githubusercontent serves the identical bytes and is not subject to the
-+        # unauthenticated api.github.com rate limit that runners exhaust (HTTP 403).
++        # raw.githubusercontent serves the identical bytes at the pinned tree and is not
++        # subject to the unauthenticated api.github.com rate limit runners exhaust (403).
++        # The firmware pin records tree_sha (not commit), so the path is tree_sha + name.
 +        url = firmware['repository'].replace('https://github.com/', 'https://raw.githubusercontent.com/')
-+        url += '/' + firmware['commit'] + '/' + name
++        url += '/' + firmware['tree_sha'] + '/' + name
          jobs.append((ROOT / '.cache/firmware/sheng-gpu' / name, url, expected, blob, None))
      with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
          sizes = list(executor.map(fetch, jobs))
