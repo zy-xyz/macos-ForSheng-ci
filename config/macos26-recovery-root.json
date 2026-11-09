@@ -3,7 +3,7 @@
   "variant": "recoveryos",
   "window": "OS",
   "bytes": 1577092608,
-  "sha256": "6199e53d3cf60c59790e507851ef48141dbfa23875fdde5e838446984ed56881",
+  "sha256": "de374721af1d37eaac0e54d902851260985e89e4779bc08cabfc475344be105b",
   "volume_uuid": "808eac5e-8275-478d-814c-2229d8eb8d07",
   "isc": {
     "window": "ISC",
