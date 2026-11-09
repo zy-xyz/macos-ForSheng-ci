@@ -142,8 +142,13 @@ def build(root, out, compile_record, source, run, record, env, *, transport='vir
                 index += 1
             elif arg == '-Xclang' and arguments[index + 1].startswith('-W'):
                 index += 1
-            elif arg == '-x':
-                index += 1
+            elif arg.startswith('-x'):
+                # '-x c++' arrives either split ('-x', 'c++') or fused ('-xc++'); drop both so the
+                # pinned '-x c' below is the only language switch clang sees.
+                if arg == '-x':
+                    index += 1
+            elif arg.startswith('--driver-mode='):
+                pass
             elif arg.startswith('-W') or arg.startswith('-std='):
                 pass
             elif arg not in ('-MMD', '-MD', '-MP'):
