@@ -57,7 +57,10 @@ jobs:
           # textual comparison (mesa_patch_identity.py, build-native-metal-bridge.py:50)
           # fails with "patch result differs". Pin the width globally for the job.
           git config --global core.abbrev 7
-          brew install ninja cmake glslang shaderc spirv-tools llvm bison pkg-config
+          brew install ninja cmake glslang shaderc spirv-tools vulkan-headers llvm bison pkg-config
+          # check-turnip-darwin-host.py compiles drivers/NativeAdreno/tests/hostsim/vulkan_smoke.c
+          # with -I /opt/homebrew/include and needs <vulkan/vulkan.h> there.
+          ls -l "$(brew --prefix)/include/vulkan/vulkan.h"
           echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
           echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
 
