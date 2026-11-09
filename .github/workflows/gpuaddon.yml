@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       build_host_smoke:
-        description: Also build the host Turnip + hostsim and record the replay (needs an upstream fixture fix; see notes)
+        description: Build the host Turnip + hostsim and record the replay (build-adreno-metal-plugin.py:30 always needs it)
         type: boolean
-        default: false
+        default: true
       jobs:
         description: ninja/make parallel jobs
         type: number
@@ -132,6 +132,21 @@ jobs:
         run: |
           git clone --filter=blob:none https://github.com/steelbrain/metal2vulkan UniXNU/.cache/gpu-reference/metal2vulkan
           git -C UniXNU/.cache/gpu-reference/metal2vulkan checkout "$M2V_COMMIT"
+
+      - name: Align the NativeAdreno hostsim fixture
+        # The pinned submodule commit (cedcaa2) has NativeAdrenoMemory.cpp using IODirection and
+        # kIOMemoryPersistent while tests/XnuMemoryFixture.h still lacks both, so the hostsim does
+        # not compile. Upstream 6fa7bae carries the matching fixture. This affects only the host
+        # simulation (a test double); the iOS plugin bundle and the kernel are untouched.
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.build_host_smoke }}" = "true" ]; then
+            git -C UniXNU/drivers/NativeAdreno fetch --depth 1 origin 6fa7bae2a5b3b523e790eb3e0348af4d98969e4d
+            git -C UniXNU/drivers/NativeAdreno checkout 6fa7bae2a5b3b523e790eb3e0348af4d98969e4d
+            grep -c 'kIOMemoryPersistent' UniXNU/drivers/NativeAdreno/tests/XnuMemoryFixture.h
+          else
+            echo 'host smoke disabled: leaving the pinned fixture as is'
+          fi
 
       - name: Build Turnip (host) for the replay recorder
         if: inputs.build_host_smoke
