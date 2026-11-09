@@ -160,6 +160,24 @@ jobs:
           fi
           grep -n 'IODirection' "$F"
           grep -n 'kIOMemoryPersistent' "$F"
+          # NativeAdrenoUserClient.cpp:14 declares proc_selfpid() and calls it at :237, but the host
+          # IOKit shim does not provide it, so libhostiokit.dylib fails to link. Provide the kernel
+          # entry point as a host double (the pid only feeds a diagnostic tag).
+          S=UniXNU/drivers/NativeAdreno/tests/hostsim/host_iokit_shim.cpp
+          if ! grep -q 'proc_selfpid' "$S"; then
+            python3 - "$S" <<'PY'
+          import sys
+          from pathlib import Path
+          p = Path(sys.argv[1])
+          text = p.read_text()
+          marker = 'INTERPOSE(shim_getpagesize, getpagesize);'
+          assert marker in text, 'shim layout changed'
+          addition = ('extern "C" int proc_selfpid (void) {return (int)getpid ();}' + chr(10) + chr(10))
+          p.write_text(text.replace(marker, addition + marker, 1))
+          print('shim: proc_selfpid added')
+          PY
+          fi
+          grep -n 'proc_selfpid' "$S"
       - name: Build Turnip (host) for the replay recorder
         if: inputs.build_host_smoke
         run: python3 UniXNU/scripts/build-turnip-darwin.py --target host
