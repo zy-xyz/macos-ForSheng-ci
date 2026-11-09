@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       build_host_smoke:
-        description: Build the host Turnip + hostsim and record the replay (build-adreno-metal-plugin.py:30 always needs it)
+        description: Also build the host Turnip + hostsim and record the replay (off by default; the pinned hostsim needs four host-only fixes)
         type: boolean
-        default: true
+        default: false
       jobs:
         description: ninja/make parallel jobs
         type: number
@@ -191,6 +191,22 @@ jobs:
       - name: Compile the Turnip smoke shaders
         run: python3 UniXNU/scripts/gen-turnip-smoke-shaders.py
 
+      - name: Neutralize the replay recorder when host smoke is off
+        # build-adreno-metal-plugin.py:30 always runs gen-turnip-replay.py, but the generated
+        # build/turnip-smoke/TurnipReplay.h is optional for the plugin itself
+        # (drivers/NativeAdreno/NativeAdrenoUserTest.h:17 guards it with __has_include).
+        # The host simulator that produces it needs four independent host-only fixes at the
+        # pinned submodule commit (fixture types, proc_selfpid, vulkan headers, quartzcore cache
+        # checker); with the flag off we stub the generator so the bundle still builds without a
+        # replay header. CI-only edit; the checked-out source is never pushed anywhere.
+        if: ${{ !inputs.build_host_smoke }}
+        run: |
+          set -euo pipefail
+          cat > UniXNU/scripts/gen-turnip-replay.py <<'PY'
+          #!/usr/bin/env python3
+          print('SKIP: host replay recorder disabled (build_host_smoke=false); TurnipReplay.h stays absent')
+          PY
+          grep -n 'SKIP' UniXNU/scripts/gen-turnip-replay.py
       - name: Record Turnip's first submission (host simulation)
         # TurnipReplay.h is optional in the plugin (drivers/NativeAdreno/NativeAdrenoUserTest.h:17 uses __has_include),
         # so the plugin builds without it. The hostsim at the pinned NativeAdreno commit does not compile:
