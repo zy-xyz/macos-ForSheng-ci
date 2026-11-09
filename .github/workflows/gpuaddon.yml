@@ -52,6 +52,11 @@ jobs:
 
       - name: Install host tools
         run: |
+          # The recorded Mesa/translator patches carry 7-hex blob ids. Modern git widens
+          # core.abbrev on large repos, so `git diff` would emit 8+ and the scripts' exact
+          # textual comparison (mesa_patch_identity.py, build-native-metal-bridge.py:50)
+          # fails with "patch result differs". Pin the width globally for the job.
+          git config --global core.abbrev 7
           brew install ninja cmake glslang shaderc spirv-tools llvm bison pkg-config
           echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
           echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
