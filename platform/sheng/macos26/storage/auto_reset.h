@@ -41,7 +41,8 @@ enum {
     AR_POLLS = 100000,
     AR_PSCI_SYSTEM_RESET = 0x84000009u,
     AR_PSCI_SYSTEM_RESET2 = 0xc4000012u,
-    AR_PSCI_DENIED = -3
+    AR_PSCI_DENIED = -3,
+    AR_PSCI_VERSION = 0x84000000u
 };
 
 struct ArArbiter { volatile uint32_t *core, *cnfg; uint8_t ee; };
@@ -219,6 +220,16 @@ static void arThread (void *, wait_result_t)
     /* Ten pump periods. The reset is instantaneous, so anything printed after this point only
      * reaches the disk if the machine is still running -- which is exactly the signal we want. */
     IOSleep(5000);
+
+    /* Is PSCI reachable at all from a kext thread? PSCI_VERSION answers 0x00010001 on a 1.1
+     * implementation; anything else means the SMC itself is being swallowed before the firmware
+     * sees it, and no amount of retrying will help. */
+    {
+        int64_t version = arPsciCall(AR_PSCI_VERSION, 0, 0, 0);
+        snprintf(text, sizeof text, "reset: PSCI_VERSION -> %lld (0x%llx)",
+                 version, (unsigned long long)version);
+        sheng_log_stage(text);
+    }
 
     /* The refusal is intermittent, so retry before concluding anything: the thread may be
      * descheduled onto a core the firmware will answer. Each attempt records its own status. */
