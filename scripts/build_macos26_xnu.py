@@ -721,8 +721,13 @@ def build_gpu_archives(record, env):
                     tail=log.read_text()[-1500:]))
                 save(record)
                 continue
-            raise ValueError(f'{command[0]} failed; tail of {log}:\n'
-                             + log.read_text()[-4000:])
+            # A builder that exits through SystemExit(str) prints only that string, so the
+            # traceback may be absent entirely. Report the exit code and the whole log tail
+            # so the failing assertion is visible without another round trip.
+            body = log.read_text()
+            raise ValueError(
+                f'GPU builder {command[0]} exited {completed.returncode}; log {log} '
+                f'({len(body)} bytes):\n' + body[-16000:])
     adreno = tree / 'build/native-adreno/libNativeAdreno.a'
     legacy = tree / 'build/native-legacy-display/libNativeLegacyDisplay.late.a'
     record['gpu_archives'] = dict(
