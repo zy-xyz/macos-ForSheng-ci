@@ -219,6 +219,16 @@ static void arThread (void *, wait_result_t)
     snprintf(text, sizeof text, "reset: cpu mpidr=%llx", (unsigned long long)arMpidr());
     sheng_log_stage(text);
 
+    /* Some Qualcomm firmware only honours SYSTEM_RESET from the boot CPU; it answers DENIED to any
+     * other core. Park this thread on the boot CPU before asking, and record which one that was. */
+    {
+        int bootCpu = ml_get_boot_cpu_number();
+        thread_bind(current_thread(), cpu_to_processor(bootCpu));
+        snprintf(text, sizeof text, "reset: bound to cpu %d, mpidr=%llx",
+                 bootCpu, (unsigned long long)arMpidr());
+        sheng_log_stage(text);
+    }
+
     int64_t reset = arPsciCall(AR_PSCI_SYSTEM_RESET, 0, 0, 0);
     snprintf(text, sizeof text, "reset: SYSTEM_RESET -> %lld", reset);
     sheng_log_stage(text);
