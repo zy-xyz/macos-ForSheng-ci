@@ -265,7 +265,7 @@ jobs:
             sources/macos26/
           key: ${{ steps.native-sources.outputs.cache-primary-key }}
       - run: python3 scripts/apply_patches.py
-      - run: brew install cmake ninja unifdef
+      - run: brew install cmake ninja unifdef dtc
       - uses: actions/cache@v4
         with:
           path: private/apple/Kernel_Debug_Kit_26.5_build_25F71.dmg
