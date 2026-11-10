@@ -47,7 +47,7 @@ constexpr unsigned kLogPumpSnapshotBytes = 128u + 16384u + 65536u;
 constexpr unsigned kLogPumpBlock = 4096u;
 /* Ceiling, because the snapshot is not a whole number of blocks (82048 = 20*4096 + 128). */
 constexpr unsigned kLogPumpBlocks = (kLogPumpSnapshotBytes + kLogPumpBlock - 1) / kLogPumpBlock;  // 21
-constexpr unsigned kLogPumpPeriodMs = 2000;   /* BootLog.c:135 LogPeriodMs */
+constexpr unsigned kLogPumpPeriodMs = 500;
 
 uint8_t *gLogPumpStage;
 volatile uint32_t gLogPumpStarted;
