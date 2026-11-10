@@ -22,6 +22,10 @@ on:
       native_arch:
         description: Native kernel ABI; ARM64E is EL1 bringup only
         type: choice
+      skip_gpu:
+        description: Link without the GPU archives (escape valve while the GPU chain is unstable)
+        type: boolean
+        default: false
         options: [arm64, arm64e]
         default: arm64
 permissions:
@@ -347,9 +351,15 @@ jobs:
         run: python3 scripts/build_macos26_xnu.py --arch "$NATIVE_ARCH" --kdk-root "$SHENG_KDK_EXPANDED/KDK.pkg/Payload" -j 4
       - name: Link native macOS 26 SHENG kernel
         if: inputs.target == 'macos26-kernel'
+        env:
+          UNIXNU_SKIP_GPU: ${{ inputs.skip_gpu && '1' || '0' }}
         run: python3 scripts/build_macos26_xnu.py --arch "$NATIVE_ARCH" --link-kernel ${{ inputs.native_ufs && '--build-ufs-driver' || '' }} ${{ inputs.native_gop && '--build-gop-display' || '' }} ${{ inputs.native_input && '--build-recovery-input' || '' }} --kdk-root "$SHENG_KDK_EXPANDED/KDK.pkg/Payload" -j 4
+      - name: Record that the GPU archives were skipped
+        if: inputs.target == 'macos26-kernel' && inputs.skip_gpu
+        run: |
+          echo '::warning::UNIXNU_SKIP_GPU=1 - this kernel has no NativeAdreno/NativeLegacyDisplay; it is not GPU-qualified'
       - name: Assert the GPU components reached the kernel
-        if: inputs.target == 'macos26-kernel'
+        if: inputs.target == 'macos26-kernel' && !inputs.skip_gpu
         run: |
           K="$NATIVE_OUT/kernel.development.sheng"
           test -f "$K" || { echo "kernel missing: $K"; exit 1; }
