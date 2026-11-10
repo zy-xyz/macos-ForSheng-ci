@@ -22,12 +22,12 @@ on:
       native_arch:
         description: Native kernel ABI; ARM64E is EL1 bringup only
         type: choice
+        options: [arm64, arm64e]
+        default: arm64
       skip_gpu:
         description: Link without the GPU archives (escape valve while the GPU chain is unstable)
         type: boolean
         default: false
-        options: [arm64, arm64e]
-        default: arm64
 permissions:
   contents: read
 concurrency:
