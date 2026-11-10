@@ -213,9 +213,6 @@ static void arThread (void *, wait_result_t)
         sheng_log_stage("reset: not taken");
         return;
     }
-    /* Give the log pump two full periods before the reset takes the machine down. */
-    IOSleep(3000);
-
     snprintf(text, sizeof text, "reset: cpu mpidr=%llx", (unsigned long long)arMpidr());
     sheng_log_stage(text);
 
@@ -228,6 +225,9 @@ static void arThread (void *, wait_result_t)
                  bootCpu, (unsigned long long)arMpidr());
         sheng_log_stage(text);
     }
+    /* Ten pump periods. The reset itself is instantaneous, so anything printed after this point
+     * only reaches the disk if it is still running -- which is exactly what we want to know. */
+    IOSleep(5000);
 
     int64_t reset = arPsciCall(AR_PSCI_SYSTEM_RESET, 0, 0, 0);
     snprintf(text, sizeof text, "reset: SYSTEM_RESET -> %lld", reset);
