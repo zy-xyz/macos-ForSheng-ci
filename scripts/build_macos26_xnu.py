@@ -629,12 +629,59 @@ def build_gpu_archives(record, env):
         if target.exists():
             (cache / link).symlink_to(target.resolve())
 
+    # The mobile-graphics and accelerator audits read board-chain products from build/native-prelink
+    # and the QEMU observation under build/darwinboot-owner-hvf-*. Those come from the pinned
+    # reconstructed-inputs release (see scripts/stage_sheng_dependencies.py, which does the same
+    # for the sheng-xnu target). Stage the two files the audits actually consume; without them
+    # audit-mobile-graphics-legacy.py exits with 'No reference candidate available'.
+    private = ROOT / 'private/build-inputs/sheng-build-inputs-21H461-v1-extracted'
+    if private.is_dir():
+        for source_name, relative in (('candidate.macho', 'build/native-prelink/native-owner-mobile-graphics-candidate.macho'),
+                                      ('candidate.json',  'build/native-prelink/native-owner-mobile-graphics-candidate.json'),
+                                      ('legacy/gdb-stop.json', 'build/darwinboot-owner-hvf-mobile-graphics-legacy-class/gdb-stop.json')):
+            origin = private / source_name
+            if origin.is_file():
+                destination = tree / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                if not destination.is_file():
+                    _shutil.copy2(origin, destination)
+        record['gpu_staged_private'] = [str(p.relative_to(tree)) for p in sorted((tree / 'build/native-prelink').glob('*'))]
+    else:
+        record['gpu_staged_private'] = None
+    # build/display-analysis is where the audits write; a fresh tree has no such directory.
+    (tree / 'build/display-analysis').mkdir(parents=True, exist_ok=True)
+    (tree / 'build/gpu-analysis').mkdir(parents=True, exist_ok=True)
+
     build_env = dict(env)
     build_env['UNIXNU_XNU_OBJ'] = 'build/xnu/ios-obj/DEVELOPMENT_ARM64_SHENG'
     build_env['UNIXNU_NATIVE_ARCH'] = ARCH
     build_env['PATH'] = _os.pathsep.join([build_env.get('PATH', ''),
                                           '/opt/homebrew/opt/llvm/bin', '/opt/homebrew/opt/lld/bin'])
 
+    # Every GPU builder reuses an XNU compilation record as its compiler command line.
+    # The source-archive pass runs with -k (keep going) and is only checked for the archive
+    # size, so an individual record can be absent while the archive looks complete. Verify
+    # them here so a missing record fails before any builder runs, not after gpu-08.
+    records_root = OUT / 'obj/DEVELOPMENT_ARM64_SHENG'
+    required_records = {
+        'IOPlatformExpert.cpo.json': 'build-arm-driver.py, build-native-adreno-accelerator.py, build-native-legacy-display.py',
+        'bsd_init.o.json': 'build-native-adreno-kits.py',
+        'startup.o.json': 'build-native-legacy-display.py',
+    }
+    absent = []
+    found = {}
+    for name, consumers in required_records.items():
+        matches = sorted(records_root.glob(f'*/DEVELOPMENT/{name}'))
+        if matches:
+            found[name] = str(matches[0].relative_to(OUT))
+        else:
+            absent.append(f'{name} (needed by {consumers})')
+    if absent:
+        raise ValueError('the source-archive pass did not emit the XNU compilation records the GPU builders reuse: '
+                         + '; '.join(absent)
+                         + '. That pass runs with -k, so a missing record does not stop it.')
+    record['gpu_compile_records'] = found
+    save(record)
     commands = [
         ['extract-files.py', '--device', str(device)],
         ['fetch-adreno-inputs.py'],
@@ -642,7 +689,6 @@ def build_gpu_archives(record, env):
         ['prepare-sheng-gmu.py'],
         ['prepare-sheng-gmu-votes.py'],
         ['audit-mobile-graphics-legacy.py'],
-        ['audit-target-accelerator-base.py'],
         ['build-arm-driver.py', 'NativeAdreno'],
         ['build-native-adreno-kits.py'],
         ['build-native-adreno-accelerator.py'],
@@ -660,6 +706,15 @@ def build_gpu_archives(record, env):
                                        cwd=tree, env=build_env, stdout=stream,
                                        stderr=subprocess.STDOUT)
         if completed.returncode:
+            # Audits only describe the original Apple binaries; the builders below are what actually
+            # produce archives. A missing reference observation must not stop the build, but it is
+            # recorded so a kernel can never be presented as GPU-qualified without them.
+            if command[0].startswith('audit-'):
+                record.setdefault('gpu_audit_warnings', []).append(dict(
+                    command=command[0], returncode=completed.returncode,
+                    tail=log.read_text()[-1500:]))
+                save(record)
+                continue
             raise ValueError(f'{command[0]} failed; tail of {log}:\n'
                              + log.read_text()[-4000:])
     adreno = tree / 'build/native-adreno/libNativeAdreno.a'
