@@ -1,0 +1,22 @@
+diff --git a/drivers/NativeUfs/NativeUfs.cpp b/drivers/NativeUfs/NativeUfs.cpp
+index e16efdc..53b3e20 100755
+--- a/drivers/NativeUfs/NativeUfs.cpp
++++ b/drivers/NativeUfs/NativeUfs.cpp
+@@ -1005,6 +1005,9 @@ static uint32_t be32w (const uint8_t *at)
+ // It does not touch the LUN 4 macoslog path, so ufsPrepareRootWindows()'s validate gate
+ // is irrelevant here. Off unless sheng-log=1 (native_ufs_log_open() checks it).
+ #include "../../../platform/sheng/macos26/storage/log_pump.h"
++// Unattended-run reset: mark the PMIC reboot reason and PSCI-reset, so a test boot ends in
++// fastboot without anyone pressing power. Separate header because it needs the SPMI arbiter.
++#include "../../../platform/sheng/macos26/storage/auto_reset.h"
+ 
+ // ---- Persistent Data store window (sheng-data-persist) ----------------------------------------------------------
+ // The only part of this driver that ever writes. The consumer (NativeRamBlock's overlay) asks for a window of the given
+@@ -1977,6 +1980,7 @@ bool NativeUfs::startRoot (IOService *provider)
+   // is the root-pairing gate; a refused pump must not depend on it, because a pairing failure
+   // is exactly the case whose diagnostics matter most.
+   logPumpStart ();
++  autoResetStart ();
+ #if defined(NATIVE_UFS_RECOVERY_ROOT) && NATIVE_UFS_RECOVERY_ROOT
+   bool paired = layout->windows >= 1 && layout->windows <= 2;
+   for (unsigned i = 0; paired && i < layout->windows; ++i)
