@@ -109,6 +109,26 @@ static inline int64_t arPsciCall (uint64_t function, uint64_t a1, uint64_t a2, u
     return (int64_t)x0;
 }
 
+/* Qualcomm's own reboot request: a Silicon-Provider SMC, not PSCI. kShim takes exactly this
+ * path (vendor/kshim/src/drivers/qcom_reboot.c:591) and the vendor firmware knows it, whereas
+ * PSCI SYSTEM_RESET can come back DENIED under Gunyah. Register convention is r0 = function,
+ * r1 = argument count, r2..r5 = arguments; r0 returns 0 on success. */
+static inline int64_t arScmReboot (void)
+{
+    register uint64_t x0 __asm__("x0") = 0xc3000922ULL;
+    register uint64_t x1 __asm__("x1") = 0;
+    register uint64_t x2 __asm__("x2") = 0;
+    register uint64_t x3 __asm__("x3") = 0;
+    register uint64_t x4 __asm__("x4") = 0;
+    register uint64_t x5 __asm__("x5") = 0;
+    register uint64_t x6 __asm__("x6") = 0;
+    register uint64_t x7 __asm__("x7") = 0;
+    __asm__ volatile ("smc #0"
+                      : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3),
+                        "+r"(x4), "+r"(x5), "+r"(x6), "+r"(x7) :: "memory");
+    return (int64_t)x0;
+}
+
 static inline uint64_t arMpidr (void)
 {
     uint64_t value;
@@ -205,13 +225,20 @@ static void arThread (void *, wait_result_t)
     if (reset == 0) {
         /* The call reported success yet we are still here: say so rather than loop forever. */
         sheng_log_stage("reset: SYSTEM_RESET returned success but did not reset");
-    } else if (reset == AR_PSCI_DENIED) {
-        /* Some Qualcomm firmware refuses SYSTEM_RESET from a non-boot CPU. Reset2 takes a type
-         * argument and is the path kShim itself prefers, so try it before giving up. */
-        sheng_log_stage("reset: DENIED, trying SYSTEM_RESET2");
+    }
+    if (reset != 0) {
+        /* PSCI refused. Reset2 takes a type argument and is what kShim prefers when it has a
+         * choice, so try it before falling back to the vendor SMC. */
+        sheng_log_stage("reset: trying SYSTEM_RESET2");
         int64_t reset2 = arPsciCall(AR_PSCI_SYSTEM_RESET2, 0, 0, 0);
         snprintf(text, sizeof text, "reset: SYSTEM_RESET2 -> %lld", reset2);
         sheng_log_stage(text);
+        if (reset2 != 0) {
+            sheng_log_stage("reset: trying SCM_OEM_REBOOT");
+            int64_t scm = arScmReboot();
+            snprintf(text, sizeof text, "reset: SCM_OEM_REBOOT -> %lld", scm);
+            sheng_log_stage(text);
+        }
     }
     sheng_log_stage("reset: not taken");
 }
