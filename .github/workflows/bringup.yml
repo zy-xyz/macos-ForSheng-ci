@@ -290,6 +290,26 @@ jobs:
       - name: Link native macOS 26 SHENG kernel
         if: inputs.target == 'macos26-kernel'
         run: python3 scripts/build_macos26_xnu.py --arch "$NATIVE_ARCH" --link-kernel ${{ inputs.native_ufs && '--build-ufs-driver' || '' }} ${{ inputs.native_gop && '--build-gop-display' || '' }} ${{ inputs.native_input && '--build-recovery-input' || '' }} --kdk-root "$SHENG_KDK_EXPANDED/KDK.pkg/Payload" -j 4
+      - name: Assert the GPU components reached the kernel
+        if: inputs.target == 'macos26-kernel'
+        run: |
+          K="$NATIVE_OUT/kernel.development.sheng"
+          test -f "$K" || { echo "kernel missing: $K"; exit 1; }
+          echo "kernel: $(stat -f%z "$K") bytes"
+          # The delivered arm64e kernel already carries Apple's own AGX driver strings, so a raw
+          # count of "AGXAccelerator" is not evidence. These markers are zero in that baseline
+          # because they only exist in our board modules (site.<class> comes from the IOKit
+          # personality name, the service names and the log prefixes come from our sources).
+          fail=0
+          for pat in NativeAdrenoGpuService NativeAdrenoGmuService NativeAdrenoSmmuService \
+                     site.AGXAccelerator site.NativeLegacyDisplay 'NativeAdreno: ' 'NativeLegacyDisplay: '; do
+            n=$(strings -a "$K" | grep -c "$pat" || true)
+            echo "$pat = $n"
+            test "$n" -gt 0 || fail=1
+          done
+          # AirNir is a userspace meson target and never part of the kernel link.
+          echo "AirNir = $(strings -a "$K" | grep -c AirNir || true) (expected 0, not an assertion)"
+          test "$fail" -eq 0 || { echo "GPU markers missing from the linked kernel"; exit 1; }
       - uses: actions/cache/save@v4
         if: always() && steps.native-cache.outputs.cache-hit != 'true'
         with:
@@ -306,6 +326,7 @@ jobs:
             ${{ env.NATIVE_OUT }}/kernel.development.sheng.dSYM/
             ${{ env.NATIVE_OUT }}/storage-driver/
             ${{ env.NATIVE_OUT }}/ufs-driver/
+            ${{ env.NATIVE_OUT }}/gpu-logs/
           retention-days: 7
       - uses: actions/upload-artifact@v4
         if: always()
