@@ -39,7 +39,9 @@ enum {
     AR_SDAM_PPID = 0x071, AR_REBOOT_CELL = 0x48,
     AR_REBOOT_MASK = 0xfe, AR_REBOOT_SHIFT = 1, AR_REBOOT_BOOTLOADER = 2,
     AR_POLLS = 100000,
-    AR_PSCI_SYSTEM_RESET = 0x84000009u
+    AR_PSCI_SYSTEM_RESET = 0x84000009u,
+    AR_PSCI_SYSTEM_RESET2 = 0xc4000012u,
+    AR_PSCI_DENIED = -3
 };
 
 struct ArArbiter { volatile uint32_t *core, *cnfg; uint8_t ee; };
@@ -94,13 +96,24 @@ static inline int arWrite8 (volatile uint32_t *chn, int apid, uint8_t byteAddr, 
     return arWait(ch);
 }
 
-static inline void arPsciReset (void)
+/* Returns the PSCI status word instead of discarding it: 0 is SUCCESS, -1 NOT_SUPPORTED,
+ * -2 INVALID_PARAMETERS, -3 DENIED. The first attempt threw this away, so an intermittent
+ * refusal looked exactly like a reset that never happened. */
+static inline int64_t arPsciCall (uint64_t function, uint64_t a1, uint64_t a2, uint64_t a3)
 {
-    register uint64_t x0 __asm__("x0") = AR_PSCI_SYSTEM_RESET;
-    register uint64_t x1 __asm__("x1") = 0;
-    register uint64_t x2 __asm__("x2") = 0;
-    register uint64_t x3 __asm__("x3") = 0;
+    register uint64_t x0 __asm__("x0") = function;
+    register uint64_t x1 __asm__("x1") = a1;
+    register uint64_t x2 __asm__("x2") = a2;
+    register uint64_t x3 __asm__("x3") = a3;
     __asm__ volatile ("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3) :: "memory");
+    return (int64_t)x0;
+}
+
+static inline uint64_t arMpidr (void)
+{
+    uint64_t value;
+    __asm__ volatile ("mrs %0, mpidr_el1" : "=r"(value));
+    return value;
 }
 
 /* Marks the reboot reason, then resets. Never returns unless the mark fails. */
@@ -175,14 +188,31 @@ static void arThread (void *, wait_result_t)
     char text[160];
     int rc = arRebootToBootloader(text, sizeof text);
     sheng_log_stage(text);
-    if (rc == 0) {
-        /* Give the log pump two full periods before the reset takes the machine down. The pump
-         * samples the ring every 500 ms, so a shorter wait loses exactly the line that says what
-         * happened -- which is why the first attempt left no trace on disk. */
-        IOSleep(3000);
-        arPsciReset();
+    if (rc != 0) {
+        /* A refused mark means the device would come back up in macOS; say so and keep running. */
+        sheng_log_stage("reset: not taken");
+        return;
     }
-    /* A refused mark means the device would come back up in macOS; say so and leave it running. */
+    /* Give the log pump two full periods before the reset takes the machine down. */
+    IOSleep(3000);
+
+    snprintf(text, sizeof text, "reset: cpu mpidr=%llx", (unsigned long long)arMpidr());
+    sheng_log_stage(text);
+
+    int64_t reset = arPsciCall(AR_PSCI_SYSTEM_RESET, 0, 0, 0);
+    snprintf(text, sizeof text, "reset: SYSTEM_RESET -> %lld", reset);
+    sheng_log_stage(text);
+    if (reset == 0) {
+        /* The call reported success yet we are still here: say so rather than loop forever. */
+        sheng_log_stage("reset: SYSTEM_RESET returned success but did not reset");
+    } else if (reset == AR_PSCI_DENIED) {
+        /* Some Qualcomm firmware refuses SYSTEM_RESET from a non-boot CPU. Reset2 takes a type
+         * argument and is the path kShim itself prefers, so try it before giving up. */
+        sheng_log_stage("reset: DENIED, trying SYSTEM_RESET2");
+        int64_t reset2 = arPsciCall(AR_PSCI_SYSTEM_RESET2, 0, 0, 0);
+        snprintf(text, sizeof text, "reset: SYSTEM_RESET2 -> %lld", reset2);
+        sheng_log_stage(text);
+    }
     sheng_log_stage("reset: not taken");
 }
 
