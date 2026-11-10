@@ -1,0 +1,71 @@
+diff --git a/kits/NativePrelink/native_prelink.py b/kits/NativePrelink/native_prelink.py
+old mode 100644
+new mode 100755
+index 3ff3095..c69f2e7
+--- a/kits/NativePrelink/native_prelink.py
++++ b/kits/NativePrelink/native_prelink.py
+@@ -15,8 +15,12 @@ def macho(data, at=0):
+     if at < 0 or at + 32 > len(data):
+         raise ValueError('Mach-O header outside image')
+     magic, cpu, subtype, kind, count, size = struct.unpack_from('<6I', data, at)
+-    if (magic, cpu, subtype) != (0xfeedfacf, 0x100000c, 0):
+-        raise ValueError('Only ordinary little-endian ARM64 is supported')
++    # Apple binaries from the pinned iPadOS baseline are arm64 (subtype 0); objects this tree
++    # compiles for an arm64e kernel are subtype 2. Both are little-endian ARM64 images and every
++    # layout walk below is subtype-agnostic, so accept both and expose which one was read.
++    architecture = {0: 'arm64', 2: 'arm64e'}.get(subtype & 0xff)
++    if magic != 0xfeedfacf or cpu != 0x100000c or architecture is None:
++        raise ValueError('Only little-endian ARM64/ARM64E is supported')
+     end = at + 32 + size
+     if end > len(data):
+         raise ValueError('Load commands outside image')
+@@ -48,7 +52,7 @@ def macho(data, at=0):
+         offset += length
+     if offset != end:
+         raise ValueError('Load command size mismatch')
+-    return {'kind': kind, 'segments': segments, 'commands': commands}
++    return {'kind': kind, 'architecture': architecture, 'segments': segments, 'commands': commands}
+ 
+ 
+ def backed_offset(segments, address, length, data_length):
+diff --git a/scripts/build-native-adreno-accelerator.py b/scripts/build-native-adreno-accelerator.py
+old mode 100644
+new mode 100755
+index 5205a68..724f741
+--- a/scripts/build-native-adreno-accelerator.py
++++ b/scripts/build-native-adreno-accelerator.py
+@@ -5,6 +5,7 @@ probe runs it after the original IOGPUFamily kext has loaded. Same binding recip
+ original constructor, destructor and metaclass addresses from build/gpu-analysis/ioaccelerator-base-abi.json)."""
+ import hashlib
+ import json
++import os
+ from pathlib import Path
+ import struct
+ import subprocess
+@@ -15,6 +16,12 @@ OUT = ROOT / 'build/native-adreno-accelerator'
+ OUT.mkdir(exist_ok=True)
+ sys.path.insert(0, str(ROOT / 'kits/NativePrelink'))
+ from native_prelink import macho
++# The kernel this archive links into decides the object platform. ld64 refuses a link whose
++# objects disagree on LC_BUILD_VERSION platform, so derive both the triple and the SDK from the
++# environment the caller sets instead of pinning the upstream iPadOS 17 pair.
++GPU_TARGET = os.environ.get('UNIXNU_GPU_TARGET', 'arm64-apple-ios17.0')
++GPU_SDK = os.environ.get('UNIXNU_GPU_SDK', 'iphoneos')
++
+ 
+ 
+ def run(cmd, **kw):
+@@ -78,8 +85,11 @@ if extra or not undefined & set(bindings):
+     sys.exit('Unexpected original-base imports: %s' % sorted(extra))
+ asm = OUT / 'original-bindings.S'
+ asm.write_text(''.join(f'.globl {n}\n.set {n}, {a:#x}\n' for n, a in sorted(bindings.items()) if n in undefined))
+-sdk = run(['xcrun', '--sdk', 'iphoneos', '--show-sdk-path'], text=True).strip()
+-run(['xcrun', 'clang', '-target', 'arm64-apple-ios17.0', '-isysroot', sdk, '-c', asm, '-o', OUT / 'original-bindings.o'])
++sdk = run(['xcrun', '--sdk', GPU_SDK, '--show-sdk-path'], text=True).strip()
++# The kernel this archive links into decides the object platform. ld64 refuses a link whose
++# objects disagree on LC_BUILD_VERSION platform, so derive it from the environment the caller
++# sets (UNIXNU_GPU_TARGET) instead of pinning the upstream iPadOS 17 triple.
++run(['xcrun', 'clang', '-target', GPU_TARGET, '-isysroot', sdk, '-c', asm, '-o', OUT / 'original-bindings.o'])
+ 
+ llvm = Path(run(['brew', '--prefix', 'llvm'], text=True).strip()) / 'bin'
+ late = OUT / 'NativeAdrenoAccelerator.late.o'
