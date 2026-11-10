@@ -774,7 +774,18 @@ def link_kernel(args, record, common, sdk, source, env):
     from build_macos26_crypto import build_provider
     crypto = build_provider(args, record, sdk, source, env)
     crypto_input = '-Wl,-force_load,' + str(crypto) if ARCH == 'arm64e' else str(crypto)
-    gpu_adreno_archive, gpu_legacy_archive = build_gpu_archives(record, env)
+    # Escape valve: the GPU archive chain is the least mature part of this build, and while it
+    # is failing it must not stop a kernel that otherwise carries the log pump, the watchdog
+    # and the storage stack. Set UNIXNU_SKIP_GPU=1 to link without the GPU archives; the
+    # resulting kernel is recorded as not GPU-qualified so it can never be mistaken for one.
+    skip_gpu = os.environ.get('UNIXNU_SKIP_GPU') == '1'
+    if skip_gpu:
+        record['gpu_skipped'] = True
+        gpu_adreno_archive = gpu_legacy_archive = None
+        save(record)
+        print('UNIXNU_SKIP_GPU=1: linking without NativeAdreno and NativeLegacyDisplay')
+    else:
+        gpu_adreno_archive, gpu_legacy_archive = build_gpu_archives(record, env)
     archives = [crypto_input, str(OUT / 'ArmDTPlatform.o'), str(OUT / 'ArmCpu.o'), str(firehose)]
     # B1: the GPU archives come from the board builders staged by build_gpu_archives();
     # they live under the assembled tree, not under OUT, because the builders locate it from their path.
