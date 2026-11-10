@@ -265,7 +265,15 @@ jobs:
             sources/macos26/
           key: ${{ steps.native-sources.outputs.cache-primary-key }}
       - run: python3 scripts/apply_patches.py
-      - run: brew install cmake ninja unifdef dtc
+      - name: Install the tools the GPU archives need
+        if: inputs.target == 'macos26-kernel'
+        run: |
+          # dtc also installs fdtget/fdtput/fdtdump (device-tree-compiler), which gpu-03..05 call;
+          # llvm provides llvm-objcopy, which gpu-10/gpu-11 call through `brew --prefix llvm`.
+          brew install cmake ninja unifdef llvm lld dtc
+          # brew llvm is keg-only, so llvm-objcopy never lands on PATH; test it where brew put it
+          test -x "$(brew --prefix llvm)/bin/llvm-objcopy"
+          command -v dtc fdtget
       - uses: actions/cache@v4
         with:
           path: private/apple/Kernel_Debug_Kit_26.5_build_25F71.dmg
@@ -284,6 +292,56 @@ jobs:
           key: macos26-native-${{ env.NATIVE_ARCH }}-${{ runner.arch }}-${{ steps.native-toolchain.outputs.identity }}-${{ hashFiles('config/macos26-sources.json', 'config/macos26.json', 'platform/sheng/macos26/patches/**', 'platform/sheng/macos26/pac/**', 'platform/sheng/macos26/log/**', 'platform/sheng/macos26/crypto/**', 'platform/sheng/macos26/recovery/**', 'config/macos26-recovery-ui-pages.json', 'scripts/native_recovery_ui.py', 'platform/sheng/macos26/storage/**', 'config/macos26-recovery-root.json', 'patches/UniXNU/0030-*', 'patches/UniXNU/0031-*', 'patches/UniXNU/0032-*', 'patches/UniXNU/0034-*', 'patches/UniXNU/0035-*', 'patches/UniXNU/0036-*', 'patches/UniXNU/0037-*', 'config/macoslog.json', 'scripts/native_log_file.py', 'scripts/build_macos26_xnu.py', 'scripts/build_macos26_storage.py', 'scripts/prepare_macos26_gop.py', 'scripts/prepare_macos26_input.py', 'config/macos26-input-reference.json', 'platform/sheng/macos26/input/**', 'config/macos26-gop-reference.json', 'platform/sheng/macos26/display/**', 'scripts/build_macos26_crypto.py', 'scripts/seal_macos26_crypto.py', 'scripts/native_macho.py') }}
           restore-keys: |
             macos26-native-${{ env.NATIVE_ARCH }}-${{ runner.arch }}-${{ steps.native-toolchain.outputs.identity }}-
+      - name: Cache the pinned reconstructed inputs (fast path, may miss on a cold run)
+        if: inputs.target == 'macos26-kernel'
+        uses: actions/cache/restore@v4
+        with:
+          path: private/build-inputs/sheng-21H461-v1.tar.gz
+          key: sheng-inputs-${{ hashFiles('config/sheng-reconstructed-inputs.json') }}
+      - name: Restore the pinned reconstructed inputs the GPU audits read
+        if: inputs.target == 'macos26-kernel'
+        id: gpu-private-inputs
+        run: |
+          # The GPU audits read board-chain products (build/native-prelink candidates and a QEMU
+          # observation) that only the pinned reconstructed-inputs release carries. The cache is a
+          # fast path; it does not exist on a cold run, so fall back to the release itself exactly
+          # like scripts/stage_sheng_dependencies.py:26-29 does for the sheng-xnu target.
+          set -euo pipefail
+          PIN=config/sheng-reconstructed-inputs.json
+          ASSET=$(python3 -c "import json;print(json.load(open('$PIN'))['asset'])")
+          RELEASE=$(python3 -c "import json;print(json.load(open('$PIN'))['release'])")
+          REPO=$(python3 -c "import json;print(json.load(open('$PIN'))['repository'])")
+          WANT_SHA=$(python3 -c "import json;print(json.load(open('$PIN'))['sha256'])")
+          WANT_BYTES=$(python3 -c "import json;print(json.load(open('$PIN'))['bytes'])")
+          ARCHIVE="private/build-inputs/$ASSET"
+          mkdir -p private/build-inputs
+          if [ ! -f "$ARCHIVE" ]; then
+            echo "cache miss for $ARCHIVE; downloading $RELEASE from $REPO"
+            gh release download "$RELEASE" --repo "$REPO" --pattern "$ASSET" --dir private/build-inputs
+          fi
+          ACTUAL_BYTES=$(stat -f%z "$ARCHIVE")
+          ACTUAL_SHA=$(shasum -a 256 "$ARCHIVE" | cut -d' ' -f1)
+          test "$ACTUAL_BYTES" = "$WANT_BYTES" || { echo "size mismatch: $ACTUAL_BYTES != $WANT_BYTES"; exit 1; }
+          test "$ACTUAL_SHA" = "$WANT_SHA" || { echo "sha256 mismatch: $ACTUAL_SHA != $WANT_SHA"; exit 1; }
+          echo "private inputs verified: $ARCHIVE ($ACTUAL_BYTES bytes)"
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Unpack the GPU reference candidate
+        if: inputs.target == 'macos26-kernel'
+        run: |
+          set -euo pipefail
+          PIN=config/sheng-reconstructed-inputs.json
+          ASSET=$(python3 -c "import json;print(json.load(open('$PIN'))['asset'])")
+          RELEASE=$(python3 -c "import json;print(json.load(open('$PIN'))['release'])")
+          OUT="private/build-inputs/$RELEASE-extracted"
+          ARCHIVE="private/build-inputs/$ASSET"
+          test -f "$ARCHIVE" || { echo "missing $ARCHIVE"; exit 1; }
+          mkdir -p "$OUT"
+          tar xzf "$ARCHIVE" -C "$OUT"
+          for f in candidate.macho candidate.json legacy/gdb-stop.json; do
+            test -f "$OUT/$f" || { echo "reference input missing from the release: $f"; exit 1; }
+          done
+          ls "$OUT" | head
       - name: Compile native macOS 26 SHENG sources
         if: inputs.target == 'macos26-xnu'
         run: python3 scripts/build_macos26_xnu.py --arch "$NATIVE_ARCH" --kdk-root "$SHENG_KDK_EXPANDED/KDK.pkg/Payload" -j 4
