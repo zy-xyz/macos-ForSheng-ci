@@ -133,10 +133,36 @@ static int arRebootToBootloader (char *text, unsigned cap)
     return 0;
 }
 
+/* Marks the PMIC reboot reason without resetting. Called at the very start of the storage
+ * bring-up so that even a kernel that panics a second later still sends the next boot to
+ * fastboot; pressing power is then enough to recover, no key chord required. */
+static int arMarkOnly (char *text, unsigned cap)
+{
+    ArArbiter a = {};
+    a.core = (volatile uint32_t *)ml_io_map_unmappable((vm_offset_t)AR_SPMI_CORE, AR_SPMI_CORE_SIZE, 7);
+    a.cnfg = (volatile uint32_t *)ml_io_map_unmappable((vm_offset_t)AR_SPMI_CNFG, AR_SPMI_CNFG_SIZE, 7);
+    a.ee = 0;
+    if (!a.core || !a.cnfg) { snprintf(text, cap, "reset: mark map failed"); return 1; }
+    volatile uint32_t *obs = (volatile uint32_t *)ml_io_map_unmappable((vm_offset_t)AR_SPMI_OBSRVR, AR_OBS_SIZE, 7);
+    volatile uint32_t *chn = (volatile uint32_t *)ml_io_map_unmappable((vm_offset_t)AR_SPMI_CHNLS, AR_CHN_SIZE, 7);
+    if (!obs || !chn) { snprintf(text, cap, "reset: mark channel map failed"); return 2; }
+    ArFound f = {};
+    int rc = arFind(&a, &f);
+    if (rc) { snprintf(text, cap, "reset: mark arbiter find rc=%d", rc); return 3 + rc; }
+    uint8_t before = 0, after = 0;
+    rc = arRead8(obs, &a, f.apid, AR_REBOOT_CELL, &before);
+    if (rc) { snprintf(text, cap, "reset: mark read rc=%d", rc); return 20 + rc; }
+    uint8_t next = (uint8_t)((before & ~AR_REBOOT_MASK) | (AR_REBOOT_BOOTLOADER << AR_REBOOT_SHIFT));
+    rc = arWrite8(chn, f.apid, AR_REBOOT_CELL, next);
+    if (rc) { snprintf(text, cap, "reset: mark write rc=%d", rc); return 30 + rc; }
+    rc = arRead8(obs, &a, f.apid, AR_REBOOT_CELL, &after);
+    if (rc || after != next) { snprintf(text, cap, "reset: mark verify rc=%d %02x->%02x", rc, before, after); return 40; }
+    snprintf(text, cap, "reset: marked %02x -> %02x", before, after);
+    return 0;
+}
+
 static void arThread (void *, wait_result_t)
 {
-    /* Announce the thread before anything can fail: without this a silent early return is
-     * indistinguishable from the thread never being started at all. */
     sheng_log_stage("reset: thread up");
     uint32_t seconds = 0;
     if (!PE_parse_boot_argn("sheng-autoreset", &seconds, sizeof seconds) || !seconds) {
@@ -162,8 +188,24 @@ static void arThread (void *, wait_result_t)
 
 }  // namespace
 
+/* Called as early as the storage bring-up allows. The mark runs inline -- before any thread and
+ * before anything that can panic -- so a kernel that dies a second later still leaves the reboot
+ * reason set and the next power press lands in fastboot. */
 static void autoResetStart (void)
 {
+    uint32_t seconds = 0;
+    if (!PE_parse_boot_argn("sheng-autoreset", &seconds, sizeof seconds) || !seconds) {
+        sheng_log_stage("reset: disabled (no sheng-autoreset)");
+        return;
+    }
+    char text[160];
+    int rc = arMarkOnly(text, sizeof text);
+    sheng_log_stage(text);
+    if (rc != 0) {
+        /* Without the mark a reset would come back into macOS; keep the machine running instead. */
+        sheng_log_stage("reset: mark failed, not arming the timer");
+        return;
+    }
     thread_t thread = nullptr;
     if (kernel_thread_start(arThread, nullptr, &thread) != KERN_SUCCESS) {
         sheng_log_stage("reset: thread start failed");
