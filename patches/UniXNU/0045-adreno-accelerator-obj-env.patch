@@ -1,0 +1,16 @@
+diff --git a/scripts/build-native-adreno-accelerator.py b/scripts/build-native-adreno-accelerator.py
+index 724f741..92da1d2 100755
+--- a/scripts/build-native-adreno-accelerator.py
++++ b/scripts/build-native-adreno-accelerator.py
+@@ -45,7 +45,10 @@ plan = json.loads(plan_path.read_text())
+ if plan['operational_overrides'] or plan['instance_bytes'] != 136 or plan['virtual_entries'] != 168:
+     sys.exit('The audited original base is not the expected 136-byte, 168-entry class without operational overrides')
+ 
+-record = json.loads((ROOT / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/iokit/DEVELOPMENT/IOPlatformExpert.cpo.json').read_text().strip().rstrip(','))
++# Honour the same object tree the other GPU builders read: this chain keeps its records under
++# DEVELOPMENT_ARM64_SHENG, not the upstream Raspberry Pi board config.
++IO_OBJ = ROOT / os.environ.get('UNIXNU_XNU_OBJ', 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837')
++record = json.loads((IO_OBJ / 'iokit/DEVELOPMENT/IOPlatformExpert.cpo.json').read_text().strip().rstrip(','))
+ source = ROOT / 'drivers/NativeAdreno/NativeAdrenoAccelerator.cpp'
+ obj = OUT / 'NativeAdrenoAccelerator.o'
+ cmd, i, args = [], 0, record['arguments']
