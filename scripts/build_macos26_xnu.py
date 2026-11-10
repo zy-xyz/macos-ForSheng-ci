@@ -655,6 +655,12 @@ def build_gpu_archives(record, env):
     build_env = dict(env)
     build_env['UNIXNU_XNU_OBJ'] = 'build/xnu/ios-obj/DEVELOPMENT_ARM64_SHENG'
     build_env['UNIXNU_NATIVE_ARCH'] = ARCH
+    # The GPU builders compile a few assembly stubs themselves. Their objects go into the same
+    # archives the kernel links, and ld64 refuses a link whose objects disagree on
+    # LC_BUILD_VERSION platform, so they must follow this chain's target, not the upstream
+    # iPadOS 17 triple they default to. The XNU records use -mmacosx-version-min=26.5.
+    build_env['UNIXNU_GPU_TARGET'] = f'{ARCH}-apple-macos26.5'
+    build_env['UNIXNU_GPU_SDK'] = 'macosx'
     build_env['PATH'] = _os.pathsep.join([build_env.get('PATH', ''),
                                           '/opt/homebrew/opt/llvm/bin', '/opt/homebrew/opt/lld/bin'])
 
