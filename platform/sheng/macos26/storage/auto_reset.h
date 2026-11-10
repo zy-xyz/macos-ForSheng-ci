@@ -150,7 +150,10 @@ static void arThread (void *, wait_result_t)
     int rc = arRebootToBootloader(text, sizeof text);
     sheng_log_stage(text);
     if (rc == 0) {
-        IOSleep(200);
+        /* Give the log pump two full periods before the reset takes the machine down. The pump
+         * samples the ring every 500 ms, so a shorter wait loses exactly the line that says what
+         * happened -- which is why the first attempt left no trace on disk. */
+        IOSleep(3000);
         arPsciReset();
     }
     /* A refused mark means the device would come back up in macOS; say so and leave it running. */
