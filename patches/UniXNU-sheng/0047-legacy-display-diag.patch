@@ -1,0 +1,23 @@
+diff --git a/scripts/build-native-legacy-display.py b/scripts/build-native-legacy-display.py
+index abe4f13..36317c9 100755
+--- a/scripts/build-native-legacy-display.py
++++ b/scripts/build-native-legacy-display.py
+@@ -110,6 +110,18 @@ for segment in image['segments']:
+                 offset,bits=struct.unpack_from('<2I',raw,ro+i*8)
+                 if bits>>27&1 and bits>>28==0 and bits>>25&3==3:relocations[sec['va']+offset]=symbols[bits&0xffffff][0]
+ compiled=[relocations.get(vtable+16+i*8) for i in range(358)]
++# TEMPORARY DIAGNOSTIC: reports exactly why the 358-slot assertion fails.
++# Remove once the cause is known; it changes no behaviour.
++_miss=[i for i,c in enumerate(compiled) if c is None]
++print(f'DIAG vtable={vtable:#x} captured={358-len(_miss)}/358 missing={_miss[:20]}{"..." if len(_miss)>20 else ""}')
++print(f'DIAG tail {vtable+16+358*8:#x} in relocations: {vtable+16+358*8 in relocations}')
++for _seg in image['segments']:
++    for _sec in _seg['sections']:
++        if _sec['va']<=vtable<_sec['va']+_sec['size']:
++            _need=16+358*8
++            print(f'DIAG section {_seg["name"]},{_sec["name"]} va={_sec["va"]:#x} size={_sec["size"]:#x}'
++                  f' vtable_off={vtable-_sec["va"]:#x} needed={_need:#x} fits={vtable-_sec["va"]+_need<=_sec["size"]}')
++print(f'DIAG relocations total={len(relocations)} symbols={len(symbols)}')
+ require(all(compiled) and vtable+16+358*8 not in relocations,'Exact owned 358-entry vtable')
+ candidate=ROOT/'build/native-prelink/native-owner-mobile-graphics-candidate.macho'
+ if not candidate.exists():  # pruned: same fallback as scripts/audit-mobile-graphics-legacy.py (identical original family executable)
