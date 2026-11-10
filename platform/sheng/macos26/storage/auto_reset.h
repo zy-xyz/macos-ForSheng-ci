@@ -135,8 +135,15 @@ static int arRebootToBootloader (char *text, unsigned cap)
 
 static void arThread (void *, wait_result_t)
 {
+    /* Announce the thread before anything can fail: without this a silent early return is
+     * indistinguishable from the thread never being started at all. */
+    sheng_log_stage("reset: thread up");
     uint32_t seconds = 0;
-    if (!PE_parse_boot_argn("sheng-autoreset", &seconds, sizeof seconds) || !seconds) return;
+    if (!PE_parse_boot_argn("sheng-autoreset", &seconds, sizeof seconds) || !seconds) {
+        sheng_log_stage("reset: no sheng-autoreset boot-arg");
+        return;
+    }
+    sheng_log_stage(seconds >= 60 ? "reset: waiting >60s" : "reset: waiting <=60s");
     IOSleep(seconds * 1000u);
 
     char text[160];
