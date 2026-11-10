@@ -1,0 +1,41 @@
+--- a/drivers/NativeUfs/NativeUfs.cpp
++++ b/drivers/NativeUfs/NativeUfs.cpp
+@@ -1249,5 +1249,5 @@
+   char *getProductString () override { return label; }
+   char *getRevisionString () override { return const_cast<char *> ("1.0"); }
+-  char *getAdditionalDeviceInfoString () override { return const_cast<char *> (overlay.pages ? "UFS ISC seed with volatile RAM overlay" : "UFS root window, read-only"); }
++  char *getAdditionalDeviceInfoString () override { return const_cast<char *> (overlay.pages ? "UFS root window with volatile RAM overlay" : "UFS root window, read-only"); }
+   IOReturn reportBlockSize (UInt64 *value) override { *value = 512; return kIOReturnSuccess; }
+   IOReturn reportEjectability (bool *value) override { *value = false; return kIOReturnSuccess; }
+@@ -1324,12 +1324,23 @@
+ #if defined(NATIVE_UFS_RECOVERY_ROOT) && NATIVE_UFS_RECOVERY_ROOT
+   uint32_t requested = 0;
+-  if (!strcmp (label, "ISC") && PE_parse_boot_argn ("native-ufs-isc-overlay", &requested, sizeof (requested)) && requested == 1) {
+-    if ((bytes & 4095) || bytes > (4ULL << 30)) return false;
+-    overlay.bytes = bytes;
+-    overlay.pages = static_cast<uint8_t **> (IOMallocZero ((bytes / 4096) * sizeof (uint8_t *)));
+-    if (!overlay.pages) return false;
+-    native_ufs_isc_overlay_enabled = 1;
+-    IOLog ("NativeUfs: ISC volatile RAM overlay limit=%llu bytes; seed remains read-only\n", kOverlayLimit);
+-  }
++  // t123: the OS window takes the same volatile overlay as the ISC seed. A first install writes
++  // APFS container metadata (firmlinks live in the container, so no image can carry them), and
++  // that write has to land somewhere. The seed itself is never modified either way.
++  const bool isIscWindow = !strcmp (label, "ISC");
++  const bool isOsWindow = !strcmp (label, "OS");
++  if ((isIscWindow || isOsWindow) &&
++      PE_parse_boot_argn ("native-ufs-isc-overlay", &requested, sizeof (requested)) && requested == 1) {
++    // Per-window ceiling: the ISC fixture is 2 GiB, the recovery OS window is 1.5 GiB today and
++    // 13 GB once it carries the whole System volume. The page table is bytes/4096*8, so a 16 GiB
++    // window costs 32 MiB of table before a single page is dirtied.
++    const uint64_t overlayCeiling = isIscWindow ? (4ULL << 30) : (16ULL << 30);
++    if ((bytes & 4095) || bytes > overlayCeiling) return false;
++    overlay.bytes = bytes;
++    overlay.pages = static_cast<uint8_t **> (IOMallocZero ((bytes / 4096) * sizeof (uint8_t *)));
++    if (!overlay.pages) return false;
++    native_ufs_isc_overlay_enabled = 1;
++    IOLog ("NativeUfs: %s volatile RAM overlay limit=%llu bytes, page table=%llu bytes; seed remains read-only\n",
++           label, (unsigned long long) kOverlayLimit, (unsigned long long) ((bytes / 4096) * sizeof (uint8_t *)));
++  }
+ #endif
+ #if defined(NATIVE_UFS_RECOVERY_ROOT) && NATIVE_UFS_RECOVERY_ROOT
