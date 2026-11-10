@@ -1,5 +1,5 @@
 diff --git a/kits/NativePrelink/native_prelink.py b/kits/NativePrelink/native_prelink.py
-index 3ff3095..7167989 100755
+index 3ff3095..c69f2e7 100644
 --- a/kits/NativePrelink/native_prelink.py
 +++ b/kits/NativePrelink/native_prelink.py
 @@ -15,8 +15,12 @@ def macho(data, at=0):
@@ -17,11 +17,20 @@ index 3ff3095..7167989 100755
      end = at + 32 + size
      if end > len(data):
          raise ValueError('Load commands outside image')
+@@ -48,7 +52,7 @@ def macho(data, at=0):
+         offset += length
+     if offset != end:
+         raise ValueError('Load command size mismatch')
+-    return {'kind': kind, 'segments': segments, 'commands': commands}
++    return {'kind': kind, 'architecture': architecture, 'segments': segments, 'commands': commands}
+ 
+ 
+ def backed_offset(segments, address, length, data_length):
 diff --git a/scripts/build-native-adreno-accelerator.py b/scripts/build-native-adreno-accelerator.py
-index 9cb85c3..1f65237 100755
+index 9cb85c3..724f741 100755
 --- a/scripts/build-native-adreno-accelerator.py
 +++ b/scripts/build-native-adreno-accelerator.py
-@@ -16,6 +16,11 @@ OUT = ROOT / 'build/native-adreno-accelerator'
+@@ -16,6 +16,12 @@ OUT = ROOT / 'build/native-adreno-accelerator'
  OUT.mkdir(exist_ok=True)
  sys.path.insert(0, str(ROOT / 'kits/NativePrelink'))
  from native_prelink import macho
@@ -30,6 +39,31 @@ index 9cb85c3..1f65237 100755
 +# environment the caller sets instead of pinning the upstream iPadOS 17 pair.
 +GPU_TARGET = os.environ.get('UNIXNU_GPU_TARGET', 'arm64-apple-ios17.0')
 +GPU_SDK = os.environ.get('UNIXNU_GPU_SDK', 'iphoneos')
++
  
  
  def run(cmd, **kw):
+@@ -39,8 +45,7 @@ plan = json.loads(plan_path.read_text())
+ if plan['operational_overrides'] or plan['instance_bytes'] != 136 or plan['virtual_entries'] != 168:
+     sys.exit('The audited original base is not the expected 136-byte, 168-entry class without operational overrides')
+ 
+-RECORDS = ROOT / os.environ.get('UNIXNU_XNU_OBJ', 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837')
+-record = json.loads((RECORDS / 'iokit/DEVELOPMENT/IOPlatformExpert.cpo.json').read_text().strip().rstrip(','))
++record = json.loads((ROOT / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/iokit/DEVELOPMENT/IOPlatformExpert.cpo.json').read_text().strip().rstrip(','))
+ source = ROOT / 'drivers/NativeAdreno/NativeAdrenoAccelerator.cpp'
+ obj = OUT / 'NativeAdrenoAccelerator.o'
+ cmd, i, args = [], 0, record['arguments']
+@@ -80,8 +85,11 @@ if extra or not undefined & set(bindings):
+     sys.exit('Unexpected original-base imports: %s' % sorted(extra))
+ asm = OUT / 'original-bindings.S'
+ asm.write_text(''.join(f'.globl {n}\n.set {n}, {a:#x}\n' for n, a in sorted(bindings.items()) if n in undefined))
+-sdk = run(['xcrun', '--sdk', 'iphoneos', '--show-sdk-path'], text=True).strip()
+-run(['xcrun', 'clang', '-target', 'arm64-apple-ios17.0', '-isysroot', sdk, '-c', asm, '-o', OUT / 'original-bindings.o'])
++sdk = run(['xcrun', '--sdk', GPU_SDK, '--show-sdk-path'], text=True).strip()
++# The kernel this archive links into decides the object platform. ld64 refuses a link whose
++# objects disagree on LC_BUILD_VERSION platform, so derive it from the environment the caller
++# sets (UNIXNU_GPU_TARGET) instead of pinning the upstream iPadOS 17 triple.
++run(['xcrun', 'clang', '-target', GPU_TARGET, '-isysroot', sdk, '-c', asm, '-o', OUT / 'original-bindings.o'])
+ 
+ llvm = Path(run(['brew', '--prefix', 'llvm'], text=True).strip()) / 'bin'
+ late = OUT / 'NativeAdrenoAccelerator.late.o'
