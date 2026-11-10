@@ -1,0 +1,101 @@
+diff --git a/scripts/build-arm-driver.py b/scripts/build-arm-driver.py
+index e14e0b6..bad0b0b 100755
+--- a/scripts/build-arm-driver.py
++++ b/scripts/build-arm-driver.py
+@@ -101,9 +101,17 @@ for _ in range(count):
+     if cmd == 0x32:
+         deployment = struct.unpack_from('<II', data, offset + 8)
+     offset += length
+-if deployment != (2, 0x110000):
+-    raise SystemExit(f'Unexpected platform deployment {deployment}')
++# The deployment comes from the XNU compilation record this builder reuses, so it must match
++# whatever the kernel itself was compiled for. macOS 26 kernels carry LC_BUILD_VERSION
++# platform=1 (macOS) minos=26.5; the upstream iPadOS 17 baseline carries platform=2 minos=17.0.
++# Accept either and record which one was seen. ld64 rejects a link whose objects disagree on
++# platform, so this is a link-time constraint, not a preference: never force the other one.
++ALLOWED_DEPLOYMENTS = {(1, 0x1A0500): 'macOS 26.5', (2, 0x110000): 'iOS 17.0'}
++if deployment not in ALLOWED_DEPLOYMENTS:
++    raise SystemExit(f'Unexpected platform deployment {deployment}; expected one of '
++                     + ', '.join(f'{k}={v}' for k, v in ALLOWED_DEPLOYMENTS.items()))
++deployment_label = ALLOWED_DEPLOYMENTS[deployment]
+ archive = out / ('lib' + component + '.a')
+ archive.unlink(missing_ok=True)
+ subprocess.run(['xcrun', 'ar', 'rcs', archive, destination], check=True)
+-print(f'{component}: -Werror build and actual ARM64/iOS 17 object audit passed')
++print(f'{component}: -Werror build and actual ARM64/{deployment_label} object audit passed')
+diff --git a/scripts/build-native-adreno-kits.py b/scripts/build-native-adreno-kits.py
+old mode 100644
+new mode 100755
+index d848e05..aa25747
+--- a/scripts/build-native-adreno-kits.py
++++ b/scripts/build-native-adreno-kits.py
+@@ -1,6 +1,6 @@
+ #!/usr/bin/env python3
+ """Add the GMU kit and firmware planner objects to the NativeAdreno archive."""
+-import json, subprocess, sys
++import json, os, subprocess, sys
+ from pathlib import Path
+ ROOT = Path(__file__).resolve().parents[1]
+ c_recipe = json.loads((ROOT / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/bsd/DEVELOPMENT/bsd_init.o.json').read_text().strip().rstrip(','))
+@@ -64,7 +64,12 @@ for label, key in embedded:
+     assembly += ['.p2align 12', '.globl ' + label, label + ':', '.incbin ' + json.dumps(str(path)), label + '_end:',
+                  '.p2align 3', '.globl ' + label + '_size', label + '_size:', '.quad ' + label + '_end-' + label]
+ (out / 'firmware.S').write_text('\n'.join(assembly) + '\n')
+-subprocess.run(['xcrun', 'clang', '-target', 'arm64-apple-ios17.0', '-Wno-incompatible-sysroot', '-c', out / 'firmware.S',
++# The kernel this archive links into decides the object platform. ld64 refuses a link whose
++# objects disagree on LC_BUILD_VERSION platform, so derive it from the environment the caller
++# sets (UNIXNU_GPU_TARGET) instead of pinning the upstream iPadOS 17 triple.
++GPU_TARGET = os.environ.get('UNIXNU_GPU_TARGET', 'arm64-apple-ios17.0')
++GPU_SDK = os.environ.get('UNIXNU_GPU_SDK', 'iphoneos')
++subprocess.run(['xcrun', 'clang', '-target', GPU_TARGET, '-Wno-incompatible-sysroot', '-c', out / 'firmware.S',
+                 '-o', out / 'firmware.o'], check=True)
+ objects.append(out / 'firmware.o')
+ archive = out / 'libNativeAdreno.a'
+diff --git a/scripts/build-native-legacy-display.py b/scripts/build-native-legacy-display.py
+index 923bab0..ebaf8b0 100755
+--- a/scripts/build-native-legacy-display.py
++++ b/scripts/build-native-legacy-display.py
+@@ -2,6 +2,7 @@
+ """Bind an owned concrete backend to the unchanged original Legacy lifecycle."""
+ import hashlib
+ import json
++import os
+ from pathlib import Path
+ import struct
+ import subprocess
+@@ -9,6 +10,12 @@ import sys
+ ROOT=Path(__file__).resolve().parents[1];OUT=ROOT/'build/native-legacy-display';OUT.mkdir(parents=True,exist_ok=True)
+ sys.path.insert(0,str(ROOT/'kits/NativePrelink'))
+ from native_prelink import macho,backed_offset,exports
++# The kernel this archive links into decides the object platform. ld64 refuses a link whose
++# objects disagree on LC_BUILD_VERSION platform, so derive both the triple and the SDK from the
++# environment the caller sets instead of pinning the upstream iPadOS 17 pair.
++GPU_TARGET = os.environ.get('UNIXNU_GPU_TARGET', 'arm64-apple-ios17.0')
++GPU_SDK = os.environ.get('UNIXNU_GPU_SDK', 'iphoneos')
++
+ def run(cmd,**kw):return subprocess.check_output([str(x) for x in cmd],timeout=90,**kw)
+ def require(v,why):
+     if not v:raise SystemExit(why)
+@@ -181,8 +188,11 @@ require(read(0xfffffff00578aa7c,24)==bytes.fromhex('080040f9084545f9030080d2e203
+ require(read(0xfffffff005777e9c,16)==bytes.fromhex('080040f908e142f900013fd6c0000036'),
+         'Original isMainDisplay dispatch uses only self and tests boolean bit zero')
+ asm=OUT/'original-bindings.S';asm.write_text(''.join(f'.globl {name}\n.set {name}, {va:#x}\n' for name,va in sorted(bindings.items())))
+-sdk=run(['xcrun','--sdk','iphoneos','--show-sdk-path'],text=True).strip()
+-run(['xcrun','clang','-target','arm64-apple-ios17.0','-isysroot',sdk,'-c',asm,'-o',OUT/'original-bindings.o'])
++sdk=run(['xcrun','--sdk',GPU_SDK,'--show-sdk-path'],text=True).strip()
++# The kernel this archive links into decides the object platform. ld64 refuses a link whose
++# objects disagree on LC_BUILD_VERSION platform, so derive it from the environment the caller
++# sets (UNIXNU_GPU_TARGET) instead of pinning the upstream iPadOS 17 triple.
++run(['xcrun','clang','-target',GPU_TARGET,'-isysroot',sdk,'-c',asm,'-o',OUT/'original-bindings.o'])
+ llvm=Path(run(['brew','--prefix','llvm'],text=True).strip())/'bin';late=OUT/'NativeLegacyDisplay.late.o'
+ run([llvm/'llvm-objcopy','--remove-section=__DATA,__mod_init_func','--globalize-symbol=__GLOBAL__sub_I_NativeLegacyDisplay.cpp',obj,late])
+ def code(data,info):
+@@ -265,7 +275,7 @@ for src in touch_c:
+ run([llvm/'llvm-objcopy','--remove-section=__DATA,__mod_init_func','--globalize-symbol=__GLOBAL__sub_I_AppleARMBacklight.cpp',
+      backlight_class_obj,backlight_class_late])
+ archive=OUT/'libNativeLegacyDisplay.late.a';archive.unlink(missing_ok=True)
+-print(run(['python3',ROOT/'scripts/build-native-hid-input.py','--candidate',candidate],text=True),end='')
++print(run(['python3',ROOT/'scripts/build-native-hid-input.py'],text=True),end='')
+ hid_dir=ROOT/'build/native-hid-input'
+ print(run(['python3',ROOT/'scripts/build-arm-driver.py','NativeKeyStoreEvents'],text=True),end='')
+ keyevents=ROOT/'build/native-keystore-events'
